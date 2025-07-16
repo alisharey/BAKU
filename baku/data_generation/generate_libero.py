@@ -9,7 +9,7 @@ from libero.libero.envs import OffScreenRenderEnv
 
 from sentence_transformers import SentenceTransformer
 
-DATASET_PATH = Path("/path/to/datasets")
+DATASET_PATH = Path("/l/users/ali.abouzeid/LIBERO/libero/libero/../datasets")
 BENCHMARKS = ["libero_10", "libero_90"]
 SAVE_DATA_PATH = Path("../../expert_demos/libero")
 img_size = (128, 128)

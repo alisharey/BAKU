@@ -4,7 +4,9 @@ import warnings
 import os
 
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
-os.environ["MUJOCO_GL"] = "egl"
+# os.environ["MUJOCO_GL"] = "egl"
+os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from pathlib import Path
 
