@@ -26,6 +26,7 @@ class BCDataset(IterableDataset):
         intermediate_goal_step=50,
         store_actions=False,
     ):
+        print(f"Loading dataset from {path} with suite {suite}")
         self._obs_type = obs_type
         self._prompt = prompt
         self._history = history
@@ -49,17 +50,22 @@ class BCDataset(IterableDataset):
         self._paths = []
         # for suite in suites:
         self._paths.extend(list((Path(path) / suite).glob("*")))
-
+        print(f"Found {len(self._paths)} paths in {path}/{suite}")
         if task_name is not None:
             paths = {}
             idx2name = {}
             for path in self._paths:
-                task = str(path).split(".")[0].split("/")[-1]
+                # print(f"Checking {str(path)}")
+                task = str(path).split("/")[-1].split(".")[0]
+
+                # task = str(path).split(".")[0].split("/")[-1]
+                # print(f"Task: {task}")
                 if task in task_name:
                     # get idx of task in task_name
                     idx = task_name.index(task)
                     paths[idx] = path
                     idx2name[idx] = task
+            print(paths)
             del self._paths
             self._paths = paths
 
@@ -72,6 +78,8 @@ class BCDataset(IterableDataset):
         self._max_episode_len = 0
         self._max_state_dim = 0
         self._num_samples = 0
+        print(f"Found {len(self._paths)} paths in {path}/{suite}")
+
         for _path_idx in self._paths:
             print(f"Loading {str(self._paths[_path_idx])}")
             # read
@@ -143,6 +151,7 @@ class BCDataset(IterableDataset):
 
         # Samples from envs
         self.envs_till_idx = len(self._episodes)
+        print(f"Number of environments: {self.envs_till_idx}")
 
     def _sample_episode(self, env_idx=None):
         idx = random.randint(0, self.envs_till_idx - 1) if env_idx is None else env_idx
