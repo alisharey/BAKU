@@ -4,8 +4,17 @@ from collections import deque
 
 import torch
 from torch import nn
+import os, sys
+
+baku_agent_path = os.path.dirname(os.path.abspath(__file__))
+baku_path = os.path.dirname(baku_agent_path)
+vggt_parent_path = os.path.join(baku_path, 'vggt') # Path to the outer vggt folder
+if vggt_parent_path not in sys.path:
+    sys.path.insert(0, vggt_parent_path)
 
 from torchvision import transforms as T
+from vggt.models.vggt import VGGT # Corrected import path
+from vggt.heads.dpt_head import DPTHead
 
 import utils
 from agent.networks.rgb_modules import BaseEncoder, ResnetEncoder
@@ -19,6 +28,80 @@ from agent.networks.policy_head import (
 from agent.networks.gpt import GPT, GPTConfig
 from agent.networks.mlp import MLP
 from agent.networks.kmeans_discretizer import KMeansDiscretizer
+
+
+
+class VGGTProjector(nn.Module):
+    def __init__(self, intermediate_layer_idx=[4, 11, 17, 23], input_dim=2048, output_dim=512):
+        super().__init__()
+        self.intermediate_layer_idx = intermediate_layer_idx
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        
+        # Conv layers to process each intermediate layer
+        self.layer_convs = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(input_dim, 1024, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv1d(1024, 512, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool1d(1)  # Pool to single token per layer
+            ) for _ in range(len(intermediate_layer_idx))
+        ])
+        
+        # Final projection to combine all layers
+        self.final_proj = nn.Sequential(
+            nn.Linear(512 * len(intermediate_layer_idx), 1024),
+            nn.ReLU(),
+            nn.Linear(1024, output_dim)
+        )
+    
+    def forward(self, aggregated_tokens_list):
+        """
+        Args:
+            aggregated_tokens_list: List of length 24, we use indices [4, 11, 17, 23]
+        
+        Returns:
+            torch.Tensor: Shape [batch_size, 2, output_dim]
+        """
+        # Extract the 4 intermediate layers
+        selected_tokens = []
+        for idx in self.intermediate_layer_idx:
+            selected_tokens.append(aggregated_tokens_list[idx])
+        
+        # Stack to get [batch_size, 4, 2, 86, 2048]
+        selected_tokens = torch.stack(selected_tokens, dim=1)
+        batch_size, num_layers, num_views, seq_len, hidden_dim = selected_tokens.shape
+        
+        # Process each view separately
+        output_views = []
+        for view_idx in range(num_views):
+            view_tokens = selected_tokens[:, :, view_idx, :, :]  # [batch_size, 4, 86, 2048]
+            
+            # Process each layer
+            layer_features = []
+            for layer_idx in range(num_layers):
+                layer_token = view_tokens[:, layer_idx, :, :]  # [batch_size, 86, 2048]
+                
+                # Transpose for conv1d: [batch_size, 2048, 86]
+                layer_token = layer_token.transpose(1, 2)
+                
+                # Apply convolutions
+                processed = self.layer_convs[layer_idx](layer_token)  # [batch_size, 512, 1]
+                processed = processed.squeeze(-1)  # [batch_size, 512]
+                layer_features.append(processed)
+            
+            # Concatenate all layer features
+            view_features = torch.cat(layer_features, dim=1)  # [batch_size, 512 * 4]
+            
+            # Final projection
+            view_output = self.final_proj(view_features)  # [batch_size, output_dim]
+            output_views.append(view_output)
+        
+        # Stack views to get [batch_size, 2, output_dim]
+        output = torch.stack(output_views, dim=1)
+        
+        return output
 
 
 class Actor(nn.Module):
@@ -212,7 +295,7 @@ class BCAgent:
         self.language_fusion = "none" if not self.use_language else "film"
         self.language_dim = 384
         self.lang_repr_dim = 512
-
+        print(f"encoder type {self.encoder_type}")
         # actor parameters
         self._act_dim = action_shape[0]
 
@@ -292,6 +375,21 @@ class BCAgent:
                         p.numel() for p in self.encoder.parameters() if p.requires_grad
                     )
                 self.repr_dim = 512
+            elif self.encoder_type == "vggt":
+                dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+                
+                # Initialize the model
+                self.vggt = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
+                
+                # More efficient projection using pooled features
+                # Input: pooled VGGT features (2048 -> 512)
+                
+                self.encoder = VGGTProjector().to(device)
+                
+                self.repr_dim = 512
+                model_size += sum(
+                    p.numel() for p in self.encoder.parameters() if p.requires_grad
+                )
             elif self.encoder_type == "patch":
                 pass
         else:
@@ -551,22 +649,58 @@ class BCAgent:
         if self.obs_type == "pixels":
             # add to buffer
             features = []
-            for key in self.pixel_keys:
-                self.observation_buffer[key].append(
-                    self.test_aug(obs[key].transpose(1, 2, 0)).numpy()
-                )
-                pixels = torch.as_tensor(
-                    np.array(self.observation_buffer[key]), device=self.device
-                ).float()
-                pixels = self.customAug(pixels / 255.0) if self.norm else pixels
-                # encoder
-                lang = lang_features if self.film else None
-                pixels = (
-                    self.encoder[key](pixels, lang=lang)
-                    if self.separate_encoders
-                    else self.encoder(pixels, lang=lang)
-                )
-                features.append(pixels)
+            if self.encoder_type == "vggt":
+                # Collect and stack all pixel key images into a single tensor of shape [B, num_keys, C, H, W]
+                pixel_list = []
+                for key in self.pixel_keys:
+                    self.observation_buffer[key].append(
+                        self.test_aug(obs[key].transpose(1, 2, 0)).numpy()
+                    )
+                    pixels = torch.as_tensor(
+                        np.array(self.observation_buffer[key]), device=self.device
+                    ).float()
+                    pixels = self.customAug(pixels / 255.0) if self.norm else pixels
+                    pixel_list.append(pixels)  # take the most recent frame for each key
+
+                # Stack along new dimension: [B, num_keys, C, H, W]
+                pixels = torch.stack(pixel_list, dim=1)
+
+                # Merge num_keys and batch for processing: [B * num_keys, C, H, W]
+                B, num_keys, C, H, W = pixels.shape
+                # print(f"pixels shape before vggt: {pixels.shape}")
+
+                with torch.no_grad():
+                    vggt_features_list, ps_idx = self.vggt.aggregator(pixels)
+                    
+                
+                pixels = self.encoder(vggt_features_list)
+                
+
+                for i in range(num_keys):
+                    key_features = pixels[:, i:i+1, :]  # [B, 1, 512]
+                    key_features = key_features.squeeze(1)  # [B, 512]
+                    
+                    
+                    features.append(key_features)
+            
+            else:
+                for key in self.pixel_keys:
+                    self.observation_buffer[key].append(
+                        self.test_aug(obs[key].transpose(1, 2, 0)).numpy()
+                    )
+                    pixels = torch.as_tensor(
+                        np.array(self.observation_buffer[key]), device=self.device
+                    ).float()
+                    pixels = self.customAug(pixels / 255.0) if self.norm else pixels
+                    # encoder
+                    lang = lang_features if self.film else None
+                    pixels = (
+                            self.encoder[key](pixels, lang=lang)
+                            if self.separate_encoders
+                            else self.encoder(pixels, lang=lang)
+                        )
+                    features.append(pixels)
+
             if self.use_proprio:
                 obs[self.proprio_key] = pre_process(obs[self.proprio_key])
                 self.proprio_buffer.append(obs[self.proprio_key])
@@ -690,30 +824,71 @@ class BCAgent:
         # features
         if self.obs_type == "pixels":
             features = []
-            for key in self.pixel_keys:
-                pixel = data[key].float()
-                shape = pixel.shape
-                # rearrange
-                pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
-                # augment
-                pixel = self.customAug(pixel / 255.0) if self.norm else pixel
-                # encode
-                lang = lang_features if self.film else None
+
+            if self.encoder_type == "vggt":
+
+                # Collect and stack all pixel key images into a single tensor of shape [B, num_keys, C, H, W]
+                pixel_list = []
+                for key in self.pixel_keys:
+                    pixel = data[key].float()
+                    shape = pixel.shape
+                    # rearrange
+                    pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
+                    # augment
+                    pixel = self.customAug(pixel / 255.0) if self.norm else pixel
+                    # print(f"pixel shape: {pixel.shape}")
+                    pixel_list.append(pixel)  # take the most recent frame for each key
+
+                # Stack along new dimension: [B, num_keys, C, H, W]
+                pixels = torch.stack(pixel_list, dim=1)
+
+                # Merge num_keys and batch for processing: [B * num_keys, C, H, W]
+                B, num_keys, C, H, W = pixels.shape
+
+                with torch.no_grad():
+                    vggt_features_list, ps_idx = self.vggt.aggregator(pixels)
+                    # vggt_features_list: list of [B * num_keys, ...]
+                    # ps_idx: whatever is needed for projector
+
+                # Project to repr_dim and add sequence dimension
                 if self.train_encoder:
-                    pixel = (
-                        self.encoder[key](pixel, lang=lang)
-                        if self.separate_encoders
-                        else self.encoder(pixel, lang=lang)
-                    )
+                    pixels = self.encoder(vggt_features_list)
                 else:
                     with torch.no_grad():
+                        pixels = self.encoder(vggt_features_list)
+
+                
+                for i in range(num_keys):
+                    key_features = pixels[:, i:i+1, :]  # [B, 1, 512]
+                    features.append(key_features)
+
+            else:
+                for key in self.pixel_keys:
+                    pixel = data[key].float()
+                    shape = pixel.shape
+                    # print(shape)
+                    # rearrange
+                    pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
+                    # augment
+                    pixel = self.customAug(pixel / 255.0) if self.norm else pixel
+                    # encode
+                    lang = lang_features if self.film else None
+                    if self.train_encoder:
                         pixel = (
-                            self.encoder[key](pixel, lang=lang)
-                            if self.separate_encoders
-                            else self.encoder(pixel, lang=lang)
-                        )
-                pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
-                features.append(pixel)
+                                self.encoder[key](pixel, lang=lang)
+                                if self.separate_encoders
+                                else self.encoder(pixel, lang=lang)
+                            )
+                    else:
+                        with torch.no_grad():
+                            pixel = (
+                                    self.encoder[key](pixel, lang=lang)
+                                    if self.separate_encoders
+                                    else self.encoder(pixel, lang=lang)
+                                )
+                    pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
+                    features.append(pixel)
+                
             if self.use_proprio:
                 proprio = data[self.proprio_key].float()
                 proprio = self.proprio_projector(proprio)
@@ -739,6 +914,7 @@ class BCAgent:
             )
             prompt_features.append(lang_features[:, -1:])
         if self.prompt not in [None, "text", "one_hot"]:
+            print(f"Using prompt: {self.prompt}, error on the way")
             if self.use_language:
                 prompt_lang_features = lang_features[:, -1:]
                 reshape_lang = True

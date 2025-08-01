@@ -126,6 +126,19 @@ class WorkspaceIL:
                             env_idx, step
                         )
                     with torch.no_grad(), utils.eval_mode(self.agent):
+                        img_size = self.cfg.dataloader.bc_dataset.img_size
+
+                        if img_size != 128:
+                            for key, value in time_step.observation.items():
+                                if key.startswith("pixels"):
+                                    # Check if it's a 3D image tensor (C, H, W) with 128x128 images
+                                    if value.ndim == 3:
+                                        crop = (128 - img_size) // 2
+                                        image = value[:, crop:crop + img_size, crop:crop + img_size]
+                                        time_step.observation[key] = image
+                                   
+                        # Save the first image from the observation
+                        
                         action = self.agent.act(
                             time_step.observation,
                             prompt,
@@ -178,14 +191,14 @@ class WorkspaceIL:
     def load_snapshot(self, snapshots):
         # bc
         with snapshots["bc"].open("rb") as f:
-            payload = torch.load(f)
+            payload = torch.load(f, weights_only=False)
         agent_payload = {}
         for k, v in payload.items():
             if k not in self.__dict__:
                 agent_payload[k] = v
         if "vqvae" in snapshots:
             with snapshots["vqvae"].open("rb") as f:
-                payload = torch.load(f)
+                payload = torch.load(f, weights_only=False)
             agent_payload["vqvae"] = payload
         self.agent.load_snapshot(agent_payload, eval=True)
 

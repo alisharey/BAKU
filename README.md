@@ -73,5 +73,7 @@ export PYOPENGL_PLATFORM=osmesa
 # suggestions from here
 # https://pytorch.org/rl/stable/reference/generated/knowledge_base/MUJOCO_INSTALLATION.html
  
- 
+ grep -r "from huggingface_hub import.*cached_download" $CONDA_PREFIX/lib/python3.9/site-packages/ 2>/dev/null
 
+
+remove cached_download from the import line in the file /easy-diffusion/installer_files/env/lib/python3.8/site-packages/diffusers/utils/dynamic_modules_utils.py i have to modify this in my env

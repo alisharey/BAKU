@@ -229,14 +229,14 @@ class WorkspaceIL:
     def load_snapshot(self, snapshots):
         # bc
         with snapshots["bc"].open("rb") as f:
-            payload = torch.load(f)
+            payload = torch.load(f, weights_only=False)
         agent_payload = {}
         for k, v in payload.items():
             if k not in self.__dict__:
                 agent_payload[k] = v
         if "vqvae" in snapshots:
             with snapshots["vqvae"].open("rb") as f:
-                payload = torch.load(f)
+                payload = torch.load(f, weights_only=False)
             agent_payload["vqvae"] = payload
         self.agent.load_snapshot(agent_payload, eval=False)
 

@@ -40,7 +40,7 @@ class BCDataset(IterableDataset):
 
         # Convert task_names, which is a list, to a dictionary
         tasks = {task_name: scene[task_name] for scene in tasks for task_name in scene}
-
+        print(f"Tasks: {tasks}")
         # Get relevant task names
         task_name = []
         for scene in scenes:
@@ -65,7 +65,6 @@ class BCDataset(IterableDataset):
                     idx = task_name.index(task)
                     paths[idx] = path
                     idx2name[idx] = task
-            print(paths)
             del self._paths
             self._paths = paths
 
@@ -80,13 +79,31 @@ class BCDataset(IterableDataset):
         self._num_samples = 0
         print(f"Found {len(self._paths)} paths in {path}/{suite}")
 
+
+
         for _path_idx in self._paths:
-            print(f"Loading {str(self._paths[_path_idx])}")
             # read
             data = pkl.load(open(str(self._paths[_path_idx]), "rb"))
+
+            # Efficiently crop all pixel observations from 128x128 to 126x126
+            if self._obs_type == "pixels" and self.img_size != 128:
+                for episode_obs in data['observations']:
+                    for key, value in episode_obs.items():
+                        if key.startswith('pixels'):
+                            
+                            # Check if it's a 4D image tensor (N, H, W, C) with 128x128 images
+                            if value.ndim == 4 and value.shape[1:3] == (128, 128):
+                                # Center crop using fast numpy slicing from (N, 128, 128, 3) to (N, 126, 126, 3)
+                                crop = (128 - self.img_size) // 2
+                                episode_obs[key] = value[:, crop:crop + self.img_size, crop:crop + self.img_size, :]
+            
+         
+
             observations = (
                 data["observations"] if self._obs_type == "pixels" else data["states"]
             )
+
+        
             actions = data["actions"]
             task_emb = data["task_emb"]
             # store

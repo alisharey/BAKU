@@ -3,6 +3,8 @@ import h5py
 import pickle as pkl
 import numpy as np
 from pathlib import Path
+os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
@@ -10,7 +12,7 @@ from libero.libero.envs import OffScreenRenderEnv
 from sentence_transformers import SentenceTransformer
 
 DATASET_PATH = Path("/l/users/ali.abouzeid/LIBERO/libero/libero/../datasets")
-BENCHMARKS = ["libero_10", "libero_90"]
+BENCHMARKS = ["libero_goal"]
 SAVE_DATA_PATH = Path("../../expert_demos/libero")
 img_size = (128, 128)
 

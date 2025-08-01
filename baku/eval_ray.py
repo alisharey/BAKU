@@ -14,6 +14,7 @@ import hydra
 import torch
 import cv2
 import numpy as np
+from PIL import Image
 
 import utils
 from logger import Logger
@@ -22,7 +23,7 @@ from video import VideoRecorder
 
 import ray
 
-ray.init()
+ray.init(num_cpus=8, num_gpus=1)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 torch.backends.cudnn.benchmark = True
@@ -40,7 +41,7 @@ def make_agent(obs_spec, action_spec, cfg):
     return hydra.utils.instantiate(cfg.agent)
 
 
-@ray.remote(num_cpus=1, num_gpus=1)
+@ray.remote(num_cpus=2, num_gpus=0.2)
 class WorkspaceIL:
     def __init__(self, cfg, scene_idx, work_dir):
         # Must reset to use all cores: https://stackoverflow.com/questions/15639779.
@@ -154,6 +155,28 @@ class WorkspaceIL:
                             env_idx, step
                         )
                     with torch.no_grad(), utils.eval_mode(self.agent):
+                        img_size = self.cfg.dataloader.bc_dataset.img_size
+
+                        if img_size != 128:
+                            for key, value in time_step.observation.items():
+                                if key.startswith("pixels"):
+                                    # Check if it's a 3D image tensor (C, H, W) with 128x128 images
+                                    if value.ndim == 3:
+                                        crop = (128 - img_size) // 2
+                                        image = value[:, crop:crop + img_size, crop:crop + img_size]
+                                        time_step.observation[key] = image
+                        # if step == 0:
+                        #     image_keys = [k for k in time_step.observation.keys() if k.startswith("pixels")]
+                        #     if image_keys:
+                                
+                        #         img = time_step.observation["pixels"]
+                        #         # Transpose from (C, H, W) to (H, W, C) for PIL
+                        #         if img.ndim == 3:
+                        #             img = np.transpose(img, (1, 2, 0))
+                                
+                        #         im = Image.fromarray(img)
+                        #         im.save(str(self.work_dir / f"first_image_env{env_idx}.png"))
+                                
                         action = self.agent.act(
                             time_step.observation,
                             prompt,
@@ -173,11 +196,12 @@ class WorkspaceIL:
                 episode += 1
                 success.append(time_step.observation["goal_achieved"])
             self.video_recorder.save(f"{self.scene_idx}_env{env_idx}.mp4")
+            print(f"Env {env_idx}. Episode {episode} finished with total reward: {total_reward/episode}, success rate: {np.mean(success)}")
             episode_rewards.append(total_reward / episode)
             successes.append(np.mean(success))
         return episode_rewards, successes
 
-    def save_snapshot(self):
+    def save_snapshot(self): 
         snapshot = self.work_dir / "snapshot.pt"
         self.agent.clear_buffers()
         keys_to_save = ["timer", "_global_step", "_global_episode"]
@@ -191,14 +215,14 @@ class WorkspaceIL:
     def load_snapshot(self, snapshots):
         # bc
         with snapshots["bc"].open("rb") as f:
-            payload = torch.load(f)
+            payload = torch.load(f, weights_only=False)
         agent_payload = {}
         for k, v in payload.items():
             if k not in self.__dict__:
                 agent_payload[k] = v
         if "vqvae" in snapshots:
             with snapshots["vqvae"].open("rb") as f:
-                payload = torch.load(f)
+                payload = torch.load(f, weights_only=False)
             agent_payload["vqvae"] = payload
         self.agent.load_snapshot(agent_payload, eval=True)
 
@@ -209,8 +233,8 @@ def main(cfg):
 
     episode_rewards = []
     successes = []
-    num_scenes_per_eval = 4
-    num_scenes = 20  # 20 - libero90, 3 - libero10
+    num_scenes_per_eval = 3
+    num_scenes = 3# 20 - libero90, 3 - libero10
     for indexes in range(0, num_scenes, num_scenes_per_eval):
         end_idx = min(indexes + num_scenes_per_eval, num_scenes)
         workspace = [

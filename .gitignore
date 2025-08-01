@@ -171,3 +171,4 @@ cython_debug/
 */*/weights/
 expert_demos/
 */exp_local/
+baku/task_names_env.txt
