@@ -38,7 +38,9 @@ num_queries: 10
 expert_dataset: ${dataloader.bc_dataset}
 
 # Load weights
-bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/2025.07.20_train/deterministic/libero10_vggt_150/snapshot/40000.pt
+bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0804_232133_vggt_libero_10_seed_111/snapshot/100000.pt
+# /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_173954_vggt_libero_goal_seed_2/snapshot/60000.pt
+# /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_160750_vggt_libero_object_seed_2/snapshot/60000.pt
 
 hydra:
   run:

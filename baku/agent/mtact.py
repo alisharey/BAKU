@@ -94,12 +94,51 @@ class Agent:
             self.optimizer.add_param_group(
                 {"params": self.language_projector.parameters()}
             )
-
+        # self.print_optimizer_info()
         self.train()
         self.buffer_reset()
 
     def __repr__(self):
         return "mtact"
+    
+    def print_optimizer_info(self):
+    
+        print("=" * 50)
+        print("OPTIMIZER PARAMETER GROUPS")
+        print("=" * 50)
+        
+        total_params = 0
+        for i, param_group in enumerate(self.optimizer.param_groups):
+            group_params = 0
+            print(f"\nGroup {i}:")
+            print(f"  Learning rate: {param_group['lr']}")
+            print("  Parameters:")
+            
+            for param in param_group['params']:
+                param_count = param.numel()
+                group_params += param_count
+                
+                # Find parameter name
+                param_name = "unknown"
+                for name, module_param in self.actor.named_parameters():
+                    if param is module_param:
+                        param_name = f"actor.{name}"
+                        break
+                
+                if self.multitask:
+                    for name, module_param in self.language_projector.named_parameters():
+                        if param is module_param:
+                            param_name = f"language_projector.{name}"
+                            break
+                
+                print(f"    - {param_name}: {param.shape} ({param_count:,} params)")
+            
+            print(f"  Group total: {group_params:,} parameters")
+            total_params += group_params
+        
+        print(f"\nTotal optimizable parameters: {total_params:,}")
+        print("=" * 50)
+    
 
     def train(self, training=True):
         self.training = training
@@ -272,19 +311,39 @@ class Agent:
         return metrics
 
     def save_snapshot(self):
-        keys_to_save = ["actor"]
+        """
+        Saves a snapshot of the model state, only including trainable parameters.
+        This excludes large frozen backbones like VGGT.
+        """
+        payload = dict()
+        # Save actor's trainable parameters
+        payload["actor"] = {
+            name: param.cpu()
+            for name, param in self.actor.named_parameters()
+            if param.requires_grad
+        }
+        # Save language projector's parameters if it exists
         if self.multitask:
-            keys_to_save.append("language_projector")
-        payload = {k: self.__dict__[k] for k in keys_to_save}
+            payload["language_projector"] = self.language_projector.state_dict()
         return payload
 
     def load_snapshot(self, payload, eval=True):
-        for k, v in payload.items():
-            self.__dict__[k] = v
+        """
+        Loads a snapshot into the model.
+        Uses strict=False to allow loading a state_dict that is a subset of the model's
+        parameters, which is necessary because the frozen backbone is not saved.
+        """
+        if "actor" in payload:
+            self.actor.load_state_dict(payload["actor"], strict=False)
+        
+        if "language_projector" in payload and self.multitask:
+            self.language_projector.load_state_dict(payload["language_projector"])
 
         self.train()
 
+        # It's good practice to re-initialize the optimizer after loading a new state
         self.actor_opt = self.actor.optimizer
+        
 
     def load_snapshot_eval(self, payload, bc=False):
         for k, v in payload.items():

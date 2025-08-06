@@ -87,6 +87,7 @@ class DETRVAE(nn.Module):
                 self.pos = torch.nn.Embedding(1, hidden_dim)
             self.backbones = None
 
+        self.backbone_module_name = backbones[0].__class__.__name__ if backbones else "None"
         # encoder extra parameters
         self.latent_dim = 32  # final size of latent z # TODO tune
         self.cls_embed = nn.Embedding(1, hidden_dim)  # extra cls token embedding
@@ -166,14 +167,34 @@ class DETRVAE(nn.Module):
 
         if self.backbones is not None:
             # Image observation features and position embeddings
-            all_cam_features = []
-            all_cam_pos = []
-            for cam_id, cam_name in enumerate(self.camera_names):
-                features, pos = self.backbones[0](image[:, cam_id])  # HARDCODED
-                features = features[0]  # take the last layer feature
-                pos = pos[0]
-                all_cam_features.append(self.input_proj(features))
-                all_cam_pos.append(pos)
+            
+            
+            if self.backbone_module_name == "VGGTJoiner":
+        # For VGGT: Process all camera views together
+        # image shape: [batch, num_cam, channel, height, width]
+                features, pos = self.backbones[0](image)  # Pass all cameras at once
+                
+                # features should be [batch, num_cam, 512, 4, 4]
+                # pos should be list of [batch, 512, 4, 4] for each camera
+                
+                all_cam_features = []
+                all_cam_pos = []
+                for cam_id in range(len(self.camera_names)):
+                    cam_features = features[cam_id]  # [batch, 512, 4, 4]
+                    cam_pos = pos[cam_id] if isinstance(pos, list) else pos[:, cam_id]
+                    # Apply input projection
+                    all_cam_features.append(self.input_proj(cam_features))
+                    all_cam_pos.append(cam_pos)
+            else:
+                # Original logic for other backbones
+                all_cam_features = []
+                all_cam_pos = []
+                for cam_id, cam_name in enumerate(self.camera_names):
+                    features, pos = self.backbones[0](image[:, cam_id])  # HARDCODED
+                    features = features[0]  # take the last layer feature
+                    pos = pos[0]
+                    all_cam_features.append(self.input_proj(features))
+                    all_cam_pos.append(pos)
             # proprioception features
             proprio_input = self.input_proj_robot_state(qpos)
             # fold camera dimension into width dimension

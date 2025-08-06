@@ -9,7 +9,7 @@ defaults:
 root_dir: /l/users/ali.abouzeid/BAKU/
 
 # misc
-seed: 2
+seed: 111
 device: cuda
 save_video: true
 save_train_video: false
@@ -38,8 +38,8 @@ num_queries: 10
 expert_dataset: ${dataloader.bc_dataset}
 
 # Load weights
-load_bc: false
-bc_weight: null
+load_bc: true
+bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0804_232133_vggt_libero_10_seed_111/snapshot/100000.pt
 
 hydra:
   run:

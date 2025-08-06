@@ -10,7 +10,7 @@ kl_weight: 10
 hidden_dim: 512
 dim_feedforward: 3200
 lr_backbone: 1e-4
-backbone: resnet18
+backbone: vggt #resnet18
 enc_layers: 4
 dec_layers: 1
 nheads: 8
