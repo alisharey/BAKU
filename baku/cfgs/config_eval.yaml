@@ -21,7 +21,7 @@ obs_type: "pixels" # pixels, features
 num_demos_per_task: 50
 encoder_type: 'vggt' # base, resnet, vggt
 policy_type: 'gpt' # mlp, gpt
-policy_head: deterministic # deterministic, gmm, bet, diffusion, vqbet
+policy_head: vqbet # deterministic, gmm, bet, diffusion, vqbet
 use_proprio: true
 use_language: true
 use_actions: false
@@ -37,8 +37,16 @@ num_queries: 10
 # expert dataset
 expert_dataset: ${dataloader.bc_dataset}
 
+
+vggt_intermediate_layers: null
+  # - 4
+  # - 11
+  # - 17
+  # - 23
+camera_pose_variations: large
+
 # Load weights
-bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0804_232133_vggt_libero_10_seed_111/snapshot/100000.pt
+bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0824_023728_vggt_libero_10_vqbet_seed_2/snapshot/110000.pt
 # /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_173954_vggt_libero_goal_seed_2/snapshot/60000.pt
 # /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_160750_vggt_libero_object_seed_2/snapshot/60000.pt
 

@@ -29,3 +29,5 @@ num_queries: ${num_queries}
 use_language: ${use_language}
 prompt: ${prompt}
 film: true
+vggt_intermediate_layers: ${vggt_intermediate_layers}
+

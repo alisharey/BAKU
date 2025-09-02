@@ -32,12 +32,24 @@ from agent.networks.kmeans_discretizer import KMeansDiscretizer
 
 
 class VGGTProjector(nn.Module):
-    def __init__(self, intermediate_layer_idx=[4, 11, 17, 23], input_dim=2048, output_dim=512):
+    def __init__(self, intermediate_layer_idx=[4, 11, 17, 23], input_dim=2048, output_dim=512, n_total_layers=24):
+        """
+        intermediate_layer_idx: list of layer indices to use, or None => use all layers (default 24).
+        """
         super().__init__()
+        # default to all layers (0..n_total_layers-1) when None
+        if intermediate_layer_idx is None:
+            print("Using all VGGT layers for projection.")
+            intermediate_layer_idx = list(range(n_total_layers))
+        else:
+            print(f"Using VGGT layers {intermediate_layer_idx} for projection.")
+            
         self.intermediate_layer_idx = intermediate_layer_idx
         self.input_dim = input_dim
         self.output_dim = output_dim
-        
+
+        n_selected = len(self.intermediate_layer_idx)
+
         # Conv layers to process each intermediate layer
         self.layer_convs = nn.ModuleList([
             nn.Sequential(
@@ -46,28 +58,27 @@ class VGGTProjector(nn.Module):
                 nn.Conv1d(1024, 512, kernel_size=3, padding=1),
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1)  # Pool to single token per layer
-            ) for _ in range(len(intermediate_layer_idx))
+            ) for _ in range(n_selected)
         ])
-        
-        # Final projection to combine all layers
+
+        # Final projection to combine all selected layers
         self.final_proj = nn.Sequential(
-            nn.Linear(512 * len(intermediate_layer_idx), 1024),
+            nn.Linear(512 * n_selected, 1024),
             nn.ReLU(),
             nn.Linear(1024, output_dim)
         )
-    
+
     def forward(self, aggregated_tokens_list):
         """
         Args:
-            aggregated_tokens_list: List of length 24, we use indices [4, 11, 17, 23]
-        
+            aggregated_tokens_list: List of tensors (one per VGGT layer). We select indices
+                                     in self.intermediate_layer_idx (default: all 24 layers).
+
         Returns:
-            torch.Tensor: Shape [batch_size, 2, output_dim]
+            torch.Tensor: Shape [batch_size, num_views, output_dim]
         """
-        # Extract the 4 intermediate layers
-        selected_tokens = []
-        for idx in self.intermediate_layer_idx:
-            selected_tokens.append(aggregated_tokens_list[idx])
+        # gather selected tokens
+        selected_tokens = [aggregated_tokens_list[idx] for idx in self.intermediate_layer_idx]
         
         # Stack to get [batch_size, 4, 2, 86, 2048]
         selected_tokens = torch.stack(selected_tokens, dim=1)
@@ -269,6 +280,7 @@ class BCAgent:
         prompt,
         use_language,
         film,
+        vggt_intermediate_layers,
     ):
         self.device = device
         self.lr = lr
@@ -384,7 +396,7 @@ class BCAgent:
                 # More efficient projection using pooled features
                 # Input: pooled VGGT features (2048 -> 512)
                 
-                self.encoder = VGGTProjector().to(device)
+                self.encoder = VGGTProjector(intermediate_layer_idx=vggt_intermediate_layers).to(device)
                 
                 self.repr_dim = 512
                 model_size += sum(

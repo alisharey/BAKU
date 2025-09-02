@@ -105,6 +105,7 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
         else:
             print("No camera pose variations provided, using default camera position.")
 
+        print(f"Initialized with pose {self.camera_pose_variations}")
 
         self.render_image = None
 

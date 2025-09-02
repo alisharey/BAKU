@@ -9,7 +9,7 @@ defaults:
 root_dir: /l/users/ali.abouzeid/BAKU/
 
 # misc
-seed: 111
+seed: 2
 device: cuda
 save_video: true
 save_train_video: false
@@ -21,7 +21,7 @@ obs_type: "pixels" # pixels, features
 num_demos_per_task: 50
 encoder_type: 'vggt' # base, resnet, vggt
 policy_type: 'gpt' # mlp, gpt
-policy_head: deterministic # deterministic, gmm, bet, diffusion, vqbet
+policy_head: vqbet # deterministic, gmm, bet, diffusion, vqbet
 use_proprio: true
 use_language: true
 use_actions: false
@@ -34,16 +34,22 @@ experiment_label: ${policy_head}
 temporal_agg: true # aggregate actions over time
 num_queries: 10
 
+vggt_intermediate_layers: 
+  - 4
+  - 11
+  - 17
+  - 23
+camera_pose_variations: null
+
 # expert dataset
 expert_dataset: ${dataloader.bc_dataset}
-
 # Load weights
-load_bc: true
-bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0804_232133_vggt_libero_10_seed_111/snapshot/100000.pt
+load_bc: false
+bc_weight: null
 
 hydra:
   run:
-    dir: ./exp_local/${suite.suite}_${encoder_type}_train/${now:%m%d}_${now:%H%M%S}_${encoder_type}_${suite.task.suite}_seed_${seed}
+    dir: ./exp_local/${suite.suite}_${encoder_type}_train/${now:%m%d}_${now:%H%M%S}_${encoder_type}_${suite.task.suite}_${policy_head}_seed_${seed}
   sweep:
     dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}
     subdir: ${hydra.job.num}
