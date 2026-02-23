@@ -21,55 +21,92 @@ If you find this work useful, please cite the paper using the following bibtex:
   year={2024}
 }
 ```
-# Install libgpg-error (newer version for compatibility)
+# Installation Guide
 
+## 1️⃣ Install OpenGL Dependencies (Conda)
+
+``` bash
 conda install -c conda-forge glew
 conda install -c conda-forge mesalib
 conda install -c anaconda mesa-libgl-cos6-x86_64
 conda install -c menpo glfw3
-
-
 conda install -c menpo osmesa=12.2.2.dev
+```
 
+------------------------------------------------------------------------
+
+## 2️⃣ Install Newer `libgpg-error` (Compatibility Fix)
+
+``` bash
 wget https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.47.tar.bz2
 tar xjf libgpg-error-1.47.tar.bz2
 cd libgpg-error-1.47
-./configure --prefix=$CONDA_PREFIX 
+./configure --prefix=$CONDA_PREFIX
 make
 make install
+```
 
-# Install the missing gpg-error-config script
+------------------------------------------------------------------------
+
+## 3️⃣ Install Missing `gpg-error-config` Script
+
+``` bash
 cd src
 make gpg-error-config
 cp gpg-error-config $CONDA_PREFIX/bin/
 chmod +x $CONDA_PREFIX/bin/gpg-error-config
 cd ../..
+```
 
-# Set up environment variables
+------------------------------------------------------------------------
+
+## 4️⃣ Set Environment Variables
+
+``` bash
 export PATH=$CONDA_PREFIX/bin:$PATH
 export PKG_CONFIG_PATH=$CONDA_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+```
 
-# Verify gpg-error installation
+------------------------------------------------------------------------
+
+## 5️⃣ Verify `libgpg-error` Installation
+
+``` bash
 which gpg-error-config
 gpg-error-config --version
+```
 
+------------------------------------------------------------------------
+
+## 6️⃣ Install `libgcrypt`
+
+``` bash
 wget https://www.gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.5.3.tar.gz
 tar xzf libgcrypt-1.5.3.tar.gz
 cd libgcrypt-1.5.3
 ./configure --prefix=$CONDA_PREFIX
 make
 make install
+```
 
-# Set up library paths
-<!-- export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-export CPATH=$CONDA_PREFIX/include --> probably not needed
+------------------------------------------------------------------------
 
+## 7️⃣ (Optional) Set Rendering Environment Variables
+
+``` bash
 export MUJOCO_GL=osmesa
 export PYOPENGL_PLATFORM=osmesa
-# pip install pyrender -> might not be needed
- 
+```
 
+------------------------------------------------------------------------
+
+## 8️⃣ (Optional) Install `pyrender`
+
+``` bash
+pip install pyrender
+```
+ 
 # suggestions from here
 # https://pytorch.org/rl/stable/reference/generated/knowledge_base/MUJOCO_INSTALLATION.html
  
