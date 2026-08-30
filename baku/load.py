@@ -1,3 +1,5 @@
+import argparse
+
 import torch
 
 def print_dict_structure(d, indent=0, max_depth=3):
@@ -39,8 +41,8 @@ def compare_encoder_weights(state_dict1, state_dict2, key_path="actor"):
     
     if encoder1_keys != encoder2_keys:
         print(f"WARNING: Different keys in encoders!")
-        print(f"Only in 50000: {encoder1_keys - encoder2_keys}")
-        print(f"Only in 30000: {encoder2_keys - encoder1_keys}")
+        print(f"Only in checkpoint A: {encoder1_keys - encoder2_keys}")
+        print(f"Only in checkpoint B: {encoder2_keys - encoder1_keys}")
     
     # Compare each parameter
     common_keys = encoder1_keys & encoder2_keys
@@ -80,36 +82,40 @@ def compare_encoder_weights(state_dict1, state_dict2, key_path="actor"):
     
     return different_params > 0
 
-# Load both checkpoint files
-weights_path_50k = "/l/users/ali.abouzeid/BAKU/baku/exp_local/2025.07.18_train/deterministic/230614_vggt/snapshot/50000.pt"
-weights_path_30k = "/l/users/ali.abouzeid/BAKU/baku/exp_local/2025.07.18_train/deterministic/230614_vggt/snapshot/0.pt"
+def main():
+    parser = argparse.ArgumentParser(description="Compare two BAKU checkpoints")
+    parser.add_argument("checkpoint_a")
+    parser.add_argument("checkpoint_b")
+    parser.add_argument("--state-key", default="actor")
+    args = parser.parse_args()
 
-print("Loading 50k checkpoint...")
-state_dict_50k = torch.load(weights_path_50k, weights_only=False, map_location='cpu')
+    print(f"Loading checkpoint A: {args.checkpoint_a}")
+    state_dict_a = torch.load(
+        args.checkpoint_a, weights_only=False, map_location="cpu"
+    )
+    print(f"Loading checkpoint B: {args.checkpoint_b}")
+    state_dict_b = torch.load(
+        args.checkpoint_b, weights_only=False, map_location="cpu"
+    )
 
-print("Loading 30k checkpoint...")
-state_dict_30k = torch.load(weights_path_30k, weights_only=False, map_location='cpu')
-
-print(f"\n50k file type: {type(state_dict_50k)}")
-print(f"30k file type: {type(state_dict_30k)}")
-
-if isinstance(state_dict_50k, dict) and isinstance(state_dict_30k, dict):
-    print(f"50k keys: {list(state_dict_50k.keys())}")
-    print(f"30k keys: {list(state_dict_30k.keys())}")
-    
-    # Compare encoders
-    encoders_are_different = compare_encoder_weights(state_dict_50k, state_dict_30k, "actor")
-    
-    if encoders_are_different:
-        print(f"\n✅ CONFIRMED: Encoder weights are DIFFERENT between checkpoints")
+    print(f"\nCheckpoint A type: {type(state_dict_a)}")
+    print(f"Checkpoint B type: {type(state_dict_b)}")
+    if isinstance(state_dict_a, dict) and isinstance(state_dict_b, dict):
+        print(f"Checkpoint A keys: {list(state_dict_a.keys())}")
+        print(f"Checkpoint B keys: {list(state_dict_b.keys())}")
+        encoders_are_different = compare_encoder_weights(
+            state_dict_a, state_dict_b, args.state_key
+        )
+        status = "DIFFERENT" if encoders_are_different else "IDENTICAL"
+        print(f"\nEncoder weights are {status} between checkpoints")
     else:
-        print(f"\n❌ WARNING: Encoder weights are IDENTICAL between checkpoints")
-        
-else:
-    print("ERROR: One or both files are not dictionaries")
+        print("ERROR: One or both files are not dictionaries")
 
-# Optional: Print structure of first file
-print(f"\nStructure of 50k checkpoint:")
-print("=" * 50)
-if isinstance(state_dict_50k, dict):
-    print_dict_structure(state_dict_50k, max_depth=2)
+    print("\nStructure of checkpoint A:")
+    print("=" * 50)
+    if isinstance(state_dict_a, dict):
+        print_dict_structure(state_dict_a, max_depth=2)
+
+
+if __name__ == "__main__":
+    main()

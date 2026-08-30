@@ -10,13 +10,29 @@ import numpy as np
 from dm_env import StepType, specs, TimeStep
 
 import os
+from pathlib import Path
 import cv2
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ROBOSUITE_LOG_PATH = _REPO_ROOT / "robosuite_tmp"
+os.environ.setdefault("ROBO_SUITE_LOG_PATH", str(_ROBOSUITE_LOG_PATH))
+_ROBOSUITE_LOG_PATH.mkdir(parents=True, exist_ok=True)
+_HF_HOME = _REPO_ROOT / ".cache" / "huggingface"
+os.environ.setdefault("HF_HOME", str(_HF_HOME))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(_HF_HOME / "hub"))
+_HF_HOME.mkdir(parents=True, exist_ok=True)
+
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 
 from sentence_transformers import SentenceTransformer
 
-sentence_encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+SENTENCE_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+SENTENCE_MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+sentence_encoder = SentenceTransformer(
+    SENTENCE_MODEL_ID,
+    revision=SENTENCE_MODEL_REVISION,
+)
 
 
 class RGBArrayAsObservationWrapper(dm_env.Environment):
@@ -80,6 +96,8 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
         )
         self.camera_pose_variations = camera_pose_variations
         if camera_pose_variations is not None:
+            print(f"Using camera pose variations: {camera_pose_variations}")
+            # Set camera position and rotation
             camera_name = 'agentview'
             self.cam_id = self._env.sim.model.camera_name2id(camera_name)
             old_position = self._env.sim.model.cam_pos[self.cam_id].copy()
@@ -91,26 +109,21 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
                     self.new_rotation = np.array([0.44834694, 0.2579209 , 0.37187116, 0.77082661])
                 elif camera_pose_variations == 'medium':
                     self.new_position = old_position + np.array([-0.2, 0.7, -0.2])
-                    # self.new_rotation = np.array([0.16658396, 0.23584841, -0.47143382, 0.83329194])
                     self.new_rotation = np.array([0.16658396, 0.23584841, 0.47143382, 0.83329194])
                 elif camera_pose_variations == 'large':
                     self.new_position = old_position + np.array([-1.2, 1., -0.2])
                     self.new_rotation = np.array([-0.14345217, -0.20207276,  0.57364103,  0.78072021])
                 elif camera_pose_variations == 'right_medium':
-                    self.new_position = old_position + np.array([-0.2, -0.7, -0.1])
+                    self.new_position = old_position + np.array([-0.2, -0.7, +0.1])
                     self.new_rotation = np.array([0.82722725, 0.49892427, 0.16778389, 0.24274413])
-
                 else:
                     raise ValueError(f'invalid camera_pose_variation: {camera_pose_variations}')
         else:
             print("No camera pose variations provided, using default camera position.")
 
-        print(f"Initialized with pose {self.camera_pose_variations}")
-
         self.render_image = None
 
     def reset(self, **kwargs):
-        
         self._step = 0
         obs = self._env.reset(**kwargs)
         if self.camera_pose_variations is not None:
@@ -119,12 +132,12 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
             self._env.sim.model.cam_pos[self.cam_id] = self.new_position
             self._env.sim.model.cam_quat[self.cam_id] = self.new_rotation
             obs = self._env.step(action)[0]
-    
+
         self.render_image = obs["agentview_image"][::-1, :]
 
         observation = {}
-        observation["pixels"] = obs["agentview_image"][::-1, :]
-        observation["pixels_egocentric"] = obs["robot0_eye_in_hand_image"][::-1, :]
+        observation["pixels"] = np.array(cv2.resize(obs["agentview_image"][::-1, :], (128, 128)))
+        observation["pixels_egocentric"] = np.array(cv2.resize(obs["robot0_eye_in_hand_image"][::-1, :], (128, 128)))
         observation["proprioceptive"] = np.concatenate(
             [obs["robot0_joint_pos"], obs["robot0_gripper_qpos"]]
         )
@@ -134,7 +147,6 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
         observation["features"][: state.shape[0]] = state
         observation["task_emb"] = self.task_emb
         observation["goal_achieved"] = False
-        
         return observation
 
     def step(self, action):
@@ -143,8 +155,8 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
         self.render_image = obs["agentview_image"][::-1, :]
 
         observation = {}
-        observation["pixels"] = obs["agentview_image"][::-1, :]
-        observation["pixels_egocentric"] = obs["robot0_eye_in_hand_image"][::-1, :]
+        observation["pixels"] = np.array(cv2.resize(obs["agentview_image"][::-1, :], (128, 128)))
+        observation["pixels_egocentric"] = np.array(cv2.resize(obs["robot0_eye_in_hand_image"][::-1, :], (128, 128)))
         observation["proprioceptive"] = np.concatenate(
             [obs["robot0_joint_pos"], obs["robot0_gripper_qpos"]]
         )
@@ -162,7 +174,8 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
     def action_spec(self):
         return self._action_spec
 
-    def render(self, mode="rgb_array", width=256, height=256):
+    def render(self, mode="rgb_array", width=512, height=512):
+        # print(self.render_image.shape)
         return cv2.resize(self.render_image, (width, height))
 
     def __getattr__(self, name):
@@ -211,6 +224,7 @@ class FrameStackWrapper(dm_env.Environment):
         pixels_shape = wrapped_obs_spec.shape
         if len(pixels_shape) == 4:
             pixels_shape = pixels_shape[1:]
+        pixels_shape = (128, 128, 3)
         self._obs_spec = {}
         self._obs_spec["features"] = self._env.observation_spec()["features"]
         self._obs_spec["proprioceptive"] = self._env.observation_spec()[
@@ -422,18 +436,16 @@ def make(
     max_state_dim,
     eval,
     camera_pose_variations,
-    
 ):
     # Convert task_names, which is a list, to a dictionary
     tasks = {task_name: scene[task_name] for scene in tasks for task_name in scene}
-
+    print(f"camera_pose_variations: {camera_pose_variations}")
     envs = []
     task_descriptions = []
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[suite]()
     idx2name = {}
     idx = 0
-    # print(f"Creating environments for suite: {suite}, scenes: {scenes}, tasks: {tasks}")
     for scene in scenes:
         for task_name in tasks[scene]:
             if task_name in task_suite.get_task_names():
@@ -448,8 +460,8 @@ def make(
                 )
                 env_args = {
                     "bddl_file_name": task_bddl_file,
-                    "camera_heights": height,
-                    "camera_widths": width,
+                    "camera_heights": 512,
+                    "camera_widths": 512,
                 }
                 env = OffScreenRenderEnv(**env_args)
                 env.seed(seed)
@@ -468,7 +480,6 @@ def make(
                 env = ActionRepeatWrapper(env, action_repeat)
                 env = FrameStackWrapper(env, frame_stack)
                 env = ExtendedTimeStepWrapper(env)
-                
 
                 envs.append(env)
 
@@ -486,8 +497,8 @@ def make(
                     )
                     env_args = {
                         "bddl_file_name": task_bddl_file,
-                        "camera_heights": height,
-                        "camera_widths": width,
+                        "camera_heights": 128,
+                        "camera_widths": 128,
                     }
                     env = OffScreenRenderEnv(**env_args)
                     env.seed(seed)

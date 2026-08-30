@@ -5,11 +5,13 @@ defaults:
   - dataloader: libero
   - override hydra/launcher: submitit_local
 
-# Root Dir
-root_dir: /l/users/ali.abouzeid/BAKU/
+# Repository root. Set BAKU_ROOT before launching.
+root_dir: ${oc.env:BAKU_ROOT}
 
 # misc
 seed: 2
+# The rollout seed may differ from the seed stored in the trained checkpoint.
+model_seed: ${seed}
 device: cuda
 save_video: true
 save_train_video: false
@@ -19,9 +21,9 @@ batch_size: 64
 # experiment
 obs_type: "pixels" # pixels, features
 num_demos_per_task: 50
-encoder_type: 'vggt' # base, resnet, vggt
+encoder_type: 'resnet_vggt' # base, resnet, vggt, resnet_vggt, dinov2
 policy_type: 'gpt' # mlp, gpt
-policy_head: vqbet # deterministic, gmm, bet, diffusion, vqbet
+policy_head: deterministic # deterministic, gmm, bet, diffusion, vqbet
 use_proprio: true
 use_language: true
 use_actions: false
@@ -38,17 +40,33 @@ num_queries: 10
 expert_dataset: ${dataloader.bc_dataset}
 
 
-vggt_intermediate_layers: null
-  # - 4
-  # - 11
-  # - 17
-  # - 23
-camera_pose_variations: large
+vggt_intermediate_layers:
+  - 4
+  - 11
+  - 17
+  - 23
+
+dinov2_variant: stock # stock, 3dcorr
+dinov2_source_path: ${root_dir}/.cache/dinov2/source
+dinov2_source_revision: 85a24602099d397264d5b30461ad7f3bfd726ca1
+dinov2_backbone_weight_path: ${root_dir}/.cache/dinov2/checkpoints/dinov2_vitb14_pretrain.pth
+dinov2_backbone_sha256: 0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73
+dinov2_adapter_weight_path: ${root_dir}/.cache/dinov2/checkpoints/dinov2_base_3dcorr.ckpt
+dinov2_adapter_sha256: 6f83bec78ea83fcec34b30a3e461282715dec9f3bb86a0a1adb6ad2502d5c9b8
+dinov2_source_image_size: 126
+dinov2_input_size: 224
+dinov2_projector_type: final_conv_v1 # final_conv_v1, spatial_softmax_v1
+
+# Evaluation always encodes live observations. Feature caches contain only
+# training demonstrations and must not be consulted during environment rollout.
+dinov2_feature_cache_enabled: false
+dinov2_feature_cache_root: null
+dinov2_feature_cache_manifest_sha256: null
+
+camera_pose_variations: null
 
 # Load weights
-bc_weight: /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0824_023728_vggt_libero_10_vqbet_seed_2/snapshot/110000.pt
-# /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_173954_vggt_libero_goal_seed_2/snapshot/60000.pt
-# /l/users/ali.abouzeid/BAKU/baku/exp_local/libero_vggt_train/0801_160750_vggt_libero_object_seed_2/snapshot/60000.pt
+bc_weight: null
 
 hydra:
   run:

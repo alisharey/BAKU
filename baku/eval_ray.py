@@ -164,11 +164,12 @@ class WorkspaceIL:
                                     if value.ndim == 3:
                                         crop = (128 - img_size) // 2
                                         image = value[:, crop:crop + img_size, crop:crop + img_size]
+
                                         time_step.observation[key] = image
                         # if step == 0:
                         #     image_keys = [k for k in time_step.observation.keys() if k.startswith("pixels")]
                         #     if image_keys:
-                                
+
                         #         img = time_step.observation["pixels"]
                         #         # Transpose from (C, H, W) to (H, W, C) for PIL
                         #         if img.ndim == 3:

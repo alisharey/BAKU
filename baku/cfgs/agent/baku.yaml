@@ -30,4 +30,16 @@ use_language: ${use_language}
 prompt: ${prompt}
 film: true
 vggt_intermediate_layers: ${vggt_intermediate_layers}
-
+dinov2_variant: ${dinov2_variant}
+dinov2_source_path: ${dinov2_source_path}
+dinov2_source_revision: ${dinov2_source_revision}
+dinov2_backbone_weight_path: ${dinov2_backbone_weight_path}
+dinov2_backbone_sha256: ${dinov2_backbone_sha256}
+dinov2_adapter_weight_path: ${dinov2_adapter_weight_path}
+dinov2_adapter_sha256: ${dinov2_adapter_sha256}
+dinov2_source_image_size: ${dinov2_source_image_size}
+dinov2_input_size: ${dinov2_input_size}
+dinov2_projector_type: ${dinov2_projector_type}
+dinov2_feature_cache_enabled: ${dinov2_feature_cache_enabled}
+dinov2_feature_cache_root: ${dinov2_feature_cache_root}
+dinov2_feature_cache_manifest_sha256: ${dinov2_feature_cache_manifest_sha256}

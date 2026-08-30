@@ -7,6 +7,8 @@ import torch
 import torchvision.transforms as transforms
 from torch.utils.data import IterableDataset
 
+from read_data.dinov2_feature_cache import DINOv2FeatureCacheReader
+
 
 class BCDataset(IterableDataset):
     def __init__(
@@ -25,6 +27,10 @@ class BCDataset(IterableDataset):
         img_size,
         intermediate_goal_step=50,
         store_actions=False,
+        dinov2_feature_cache_enabled=False,
+        dinov2_feature_cache_root=None,
+        dinov2_feature_cache_variant=None,
+        dinov2_feature_cache_manifest_sha256=None,
     ):
         print(f"Loading dataset from {path} with suite {suite}")
         self._obs_type = obs_type
@@ -33,6 +39,29 @@ class BCDataset(IterableDataset):
         self._history_len = history_len if history else 1
         self.img_size = img_size
         self.intermediate_goal_step = intermediate_goal_step
+        self.dinov2_feature_cache_enabled = bool(dinov2_feature_cache_enabled)
+        self.dinov2_feature_cache = None
+        if self.dinov2_feature_cache_enabled:
+            if self._obs_type != "pixels":
+                raise ValueError("DINOv2 feature cache requires obs_type=pixels")
+            if int(img_size) != 126:
+                raise ValueError("DINOv2 feature cache was built from the 126x126 crop")
+            self.dinov2_feature_cache = DINOv2FeatureCacheReader(
+                cache_root=dinov2_feature_cache_root,
+                variant=dinov2_feature_cache_variant,
+                expected_manifest_sha256=dinov2_feature_cache_manifest_sha256,
+            )
+            actual_dataset_root = (Path(path).expanduser().resolve() / suite).resolve()
+            if actual_dataset_root != self.dinov2_feature_cache.dataset_root:
+                raise ValueError(
+                    "cached-training dataset root mismatch: "
+                    f"loader={actual_dataset_root} "
+                    f"cache={self.dinov2_feature_cache.dataset_root}"
+                )
+            verified_files = self.dinov2_feature_cache.verify_dataset_files()
+            print(
+                f"Verified {len(verified_files)} cached-training dataset files by SHA-256"
+            )
 
         # temporal_aggregation
         self._temporal_agg = temporal_agg
@@ -109,29 +138,49 @@ class BCDataset(IterableDataset):
             # store
             self._episodes[_path_idx] = []
             for i in range(min(num_demos_per_task, len(observations))):
+                episode_length = (
+                    len(observations[i])
+                    if not isinstance(observations[i], dict)
+                    else len(observations[i]["pixels"])
+                )
+                task_name_for_episode = idx2name[_path_idx]
+                if self.dinov2_feature_cache_enabled:
+                    cached_length = self.dinov2_feature_cache.episode_length(
+                        task_name_for_episode, i
+                    )
+                    if cached_length != episode_length:
+                        raise ValueError(
+                            "feature-cache episode length mismatch: "
+                            f"task={task_name_for_episode} episode={i} "
+                            f"dataset={episode_length} cache={cached_length}"
+                        )
+                    # Retain only non-image observations.  This keeps cached
+                    # training from needlessly holding all 12 GiB of RGB data.
+                    stored_observation = {
+                        key: value
+                        for key, value in observations[i].items()
+                        if not key.startswith("pixels")
+                    }
+                else:
+                    stored_observation = observations[i]
                 episode = dict(
-                    observation=observations[i],
+                    observation=stored_observation,
                     action=actions[i],
                     task_emb=task_emb,
+                    task_name=task_name_for_episode,
+                    episode_index=i,
+                    episode_length=episode_length,
                 )
                 self._episodes[_path_idx].append(episode)
                 self._max_episode_len = max(
                     self._max_episode_len,
-                    (
-                        len(observations[i])
-                        if not isinstance(observations[i], dict)
-                        else len(observations[i]["pixels"])
-                    ),
+                    episode_length,
                 )
                 # if obs_type == 'features':
                 self._max_state_dim = max(
                     self._max_state_dim, data["states"][i].shape[-1]
                 )
-                self._num_samples += (
-                    len(observations[i])
-                    if self._obs_type == "features"
-                    else len(observations[i]["pixels"])
-                )
+                self._num_samples += episode_length
 
                 # store actions
                 if store_actions:
@@ -184,23 +233,43 @@ class BCDataset(IterableDataset):
         if self._obs_type == "pixels":
             # Sample obs, action
             sample_idx = np.random.randint(
-                0, len(observations["pixels"]) - self._history_len
+                0, episodes["episode_length"] - self._history_len
             )
-            sampled_pixel = observations["pixels"][
-                sample_idx : sample_idx + self._history_len
-            ]
-            sampled_pixel_egocentric = observations["pixels_egocentric"][
-                sample_idx : sample_idx + self._history_len
-            ]
-            sampled_pixel = torch.stack(
-                [self.aug(sampled_pixel[i]) for i in range(len(sampled_pixel))]
-            )
-            sampled_pixel_egocentric = torch.stack(
-                [
-                    self.aug(sampled_pixel_egocentric[i])
-                    for i in range(len(sampled_pixel_egocentric))
+            if self.dinov2_feature_cache_enabled:
+                sampled_pixel = torch.from_numpy(
+                    self.dinov2_feature_cache.get_window(
+                        episodes["task_name"],
+                        episodes["episode_index"],
+                        sample_idx,
+                        self._history_len,
+                        "pixels",
+                    )
+                )
+                sampled_pixel_egocentric = torch.from_numpy(
+                    self.dinov2_feature_cache.get_window(
+                        episodes["task_name"],
+                        episodes["episode_index"],
+                        sample_idx,
+                        self._history_len,
+                        "pixels_egocentric",
+                    )
+                )
+            else:
+                sampled_pixel = observations["pixels"][
+                    sample_idx : sample_idx + self._history_len
                 ]
-            )
+                sampled_pixel_egocentric = observations["pixels_egocentric"][
+                    sample_idx : sample_idx + self._history_len
+                ]
+                sampled_pixel = torch.stack(
+                    [self.aug(sampled_pixel[i]) for i in range(len(sampled_pixel))]
+                )
+                sampled_pixel_egocentric = torch.stack(
+                    [
+                        self.aug(sampled_pixel_egocentric[i])
+                        for i in range(len(sampled_pixel_egocentric))
+                    ]
+                )
             sampled_proprioceptive_state = np.concatenate(
                 [
                     observations["joint_states"][
@@ -245,10 +314,31 @@ class BCDataset(IterableDataset):
             elif self._prompt == "goal":
                 prompt_episode = self._sample_episode(env_idx)
                 prompt_observations = prompt_episode["observation"]
-                prompt_pixel = self.aug(prompt_observations["pixels"][-1])[None]
-                prompt_pixel_egocentric = self.aug(
-                    prompt_observations["pixels_egocentric"][-1]
-                )[None]
+                if self.dinov2_feature_cache_enabled:
+                    goal_idx = prompt_episode["episode_length"] - 1
+                    prompt_pixel = torch.from_numpy(
+                        self.dinov2_feature_cache.get_window(
+                            prompt_episode["task_name"],
+                            prompt_episode["episode_index"],
+                            goal_idx,
+                            1,
+                            "pixels",
+                        )
+                    )
+                    prompt_pixel_egocentric = torch.from_numpy(
+                        self.dinov2_feature_cache.get_window(
+                            prompt_episode["task_name"],
+                            prompt_episode["episode_index"],
+                            goal_idx,
+                            1,
+                            "pixels_egocentric",
+                        )
+                    )
+                else:
+                    prompt_pixel = self.aug(prompt_observations["pixels"][-1])[None]
+                    prompt_pixel_egocentric = self.aug(
+                        prompt_observations["pixels_egocentric"][-1]
+                    )[None]
                 prompt_proprioceptive_state = np.concatenate(
                     [
                         prompt_observations["joint_states"][-1:],
@@ -280,12 +370,32 @@ class BCDataset(IterableDataset):
                 )
                 goal_idx = min(
                     sample_idx + intermediate_goal_step,
-                    len(prompt_observations["pixels"]) - 1,
+                    prompt_episode["episode_length"] - 1,
                 )
-                prompt_pixel = self.aug(prompt_observations["pixels"][goal_idx])[None]
-                prompt_pixel_egocentric = self.aug(
-                    prompt_observations["pixels_egocentric"][goal_idx]
-                )[None]
+                if self.dinov2_feature_cache_enabled:
+                    prompt_pixel = torch.from_numpy(
+                        self.dinov2_feature_cache.get_window(
+                            prompt_episode["task_name"],
+                            prompt_episode["episode_index"],
+                            goal_idx,
+                            1,
+                            "pixels",
+                        )
+                    )
+                    prompt_pixel_egocentric = torch.from_numpy(
+                        self.dinov2_feature_cache.get_window(
+                            prompt_episode["task_name"],
+                            prompt_episode["episode_index"],
+                            goal_idx,
+                            1,
+                            "pixels_egocentric",
+                        )
+                    )
+                else:
+                    prompt_pixel = self.aug(prompt_observations["pixels"][goal_idx])[None]
+                    prompt_pixel_egocentric = self.aug(
+                        prompt_observations["pixels_egocentric"][goal_idx]
+                    )[None]
                 prompt_proprioceptive_state = np.concatenate(
                     [
                         prompt_observations["joint_states"][goal_idx : goal_idx + 1],

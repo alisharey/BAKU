@@ -2,6 +2,7 @@
 
 import warnings
 import os
+import random
 
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 os.environ["MUJOCO_GL"] = "osmesa"
@@ -15,12 +16,37 @@ import cv2
 import numpy as np
 
 import utils
+from checkpoint_metadata import (
+    build_checkpoint_metadata,
+    checkpoint_metadata_mismatches,
+)
 from logger import Logger
 from replay_buffer import make_expert_replay_loader
 from video import VideoRecorder
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 torch.backends.cudnn.benchmark = True
+
+
+def capture_rng_state():
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state):
+    if not state:
+        return
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if torch.cuda.is_available() and state.get("cuda") is not None:
+        torch.cuda.set_rng_state_all([item.cpu() for item in state["cuda"]])
 
 
 def make_agent(obs_spec, action_spec, cfg):
@@ -77,14 +103,17 @@ class WorkspaceIL:
 
         # Discretizer for BeT
         if repr(self.agent) != "mtact":
-            if repr(self.agent) == "rt1" or self.cfg.agent.policy_head in [
+            needs_discretization = repr(self.agent) == "rt1" or self.cfg.agent.policy_head in [
                 "bet",
                 "vqbet",
-            ]:
+            ]
+            if needs_discretization and not self.cfg.load_bc:
                 self.agent.discretize(
                     self.expert_replay_loader.dataset.actions,
                     self.expert_replay_loader.dataset.preprocess,
                 )
+            elif needs_discretization:
+                print("Skipping action discretizer pretraining while resuming a checkpoint.")
 
         self.timer = utils.Timer()
         self._global_step = 0
@@ -105,6 +134,27 @@ class WorkspaceIL:
     @property
     def global_frame(self):
         return self.global_step * self.cfg.suite.action_repeat
+
+    def checkpoint_metadata(self):
+        """Identity fields required for a safe training continuation."""
+        return build_checkpoint_metadata(self.cfg, self.agent)
+
+    def validate_checkpoint_metadata(self, payload):
+        saved = payload.get("checkpoint_metadata")
+        if saved is None:
+            print(
+                "[warn] legacy checkpoint has no configuration metadata; "
+                "compatibility cannot be fully verified"
+            )
+            return
+        expected = self.checkpoint_metadata()
+        mismatches = checkpoint_metadata_mismatches(saved, expected)
+        if mismatches:
+            details = ", ".join(
+                f"{key}: checkpoint={actual!r}, current={current!r}"
+                for key, (actual, current) in mismatches.items()
+            )
+            raise ValueError(f"checkpoint/config mismatch: {details}")
 
     def eval(self):
         self.agent.train(False)
@@ -207,38 +257,76 @@ class WorkspaceIL:
                     log("actor_loss", metrics["actor_loss"])
                     log("step", self.global_step)
 
+            # The counter stored in a checkpoint is the next update to run.
+            # Increment before saving so a resumed process does not apply the
+            # just-completed optimizer update a second time.
+            self._global_step += 1
+
             # save snapshot
             if save_every_step(self.global_step):
                 self.save_snapshot()
 
-            self._global_step += 1
+        # The regular interval ends at 150000 for a 151000-step run. Save the
+        # actual terminal state as well so evaluation has an unambiguous final
+        # checkpoint and a resumed job never has to repeat the last 1000 steps.
+        self.save_snapshot()
 
     def save_snapshot(self):
         snapshot_dir = self.work_dir / "snapshot"
         snapshot_dir.mkdir(exist_ok=True)
         snapshot = snapshot_dir / f"{self.global_step}.pt"
         self.agent.clear_buffers()
-        keys_to_save = ["timer", "_global_step", "_global_episode", "stats"]
+        keys_to_save = ["_global_step", "_global_episode", "stats"]
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        payload["checkpoint_metadata"] = self.checkpoint_metadata()
+        payload["rng_state"] = capture_rng_state()
         payload.update(self.agent.save_snapshot())
-        with snapshot.open("wb") as f:
-            torch.save(payload, f)
+        temporary_snapshot = snapshot.with_name(
+            f".{snapshot.name}.{os.getpid()}.tmp"
+        )
+        try:
+            with temporary_snapshot.open("wb") as f:
+                torch.save(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_snapshot, snapshot)
+        finally:
+            if temporary_snapshot.exists():
+                temporary_snapshot.unlink()
 
         self.agent.buffer_reset()
 
     def load_snapshot(self, snapshots):
-        # bc
         with snapshots["bc"].open("rb") as f:
             payload = torch.load(f, weights_only=False)
+
+        self.validate_checkpoint_metadata(payload)
+        for k in ["_global_step", "_global_episode", "stats"]:
+            if k in payload:
+                self.__dict__[k] = payload[k]
+        # Timing is attempt-local. Restoring Timer's wall-clock timestamps would
+        # count time spent waiting in Slurm's queue as training time.
+        self.timer = utils.Timer()
+        print(
+            f"resumed workspace from step {self._global_step}, episode {self._global_episode}"
+        )
+
+        rng_state = payload.get("rng_state")
         agent_payload = {}
         for k, v in payload.items():
-            if k not in self.__dict__:
+            if k not in self.__dict__ and k not in {
+                "rng_state",
+                "checkpoint_metadata",
+            }:
                 agent_payload[k] = v
         if "vqvae" in snapshots:
             with snapshots["vqvae"].open("rb") as f:
                 payload = torch.load(f, weights_only=False)
             agent_payload["vqvae"] = payload
-        self.agent.load_snapshot(agent_payload, eval=False)
+        self.agent.load_snapshot(agent_payload, eval=False, load_opt=True)
+        restore_rng_state(rng_state)
+        if rng_state is not None:
+            print("restored Python, NumPy, Torch, and CUDA RNG state")
 
 
 @hydra.main(config_path="cfgs", config_name="config")
@@ -246,16 +334,18 @@ def main(cfg):
     from train import WorkspaceIL as W
 
     root_dir = Path.cwd()
+    # Load checkpoint as true resume (model + optimizer + counters)
+    snapshots = None
+    if cfg.load_bc:
+        bc_snapshot = Path(cfg.bc_weight)
+        if not bc_snapshot.is_file():
+            raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
+        print(f"resuming from snapshot: {bc_snapshot}")
+        snapshots = {"bc": bc_snapshot}
+
     workspace = W(cfg)
 
-    # Load weights
-    if cfg.load_bc:
-        snapshots = {}
-        bc_snapshot = Path(cfg.bc_weight)
-        if not bc_snapshot.exists():
-            raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
-        print(f"loading bc weight: {bc_snapshot}")
-        snapshots["bc"] = bc_snapshot
+    if snapshots is not None:
         workspace.load_snapshot(snapshots)
 
     workspace.train()

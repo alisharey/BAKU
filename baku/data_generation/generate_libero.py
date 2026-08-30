@@ -11,9 +11,13 @@ from libero.libero.envs import OffScreenRenderEnv
 
 from sentence_transformers import SentenceTransformer
 
-DATASET_PATH = Path("/l/users/ali.abouzeid/LIBERO/libero/libero/../datasets")
+DATASET_PATH = Path(
+    os.environ.get("LIBERO_DATASET_PATH", get_libero_path("datasets"))
+).expanduser()
 BENCHMARKS = ["libero_goal"]
-SAVE_DATA_PATH = Path("../../expert_demos/libero")
+SAVE_DATA_PATH = Path(
+    os.environ.get("BAKU_EXPERT_DEMO_DIR", "../../expert_demos/libero")
+).expanduser()
 img_size = (128, 128)
 
 # create save directory

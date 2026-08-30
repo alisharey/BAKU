@@ -1,0 +1,33 @@
+format_version: 1
+suite: libero_10
+dataset_root: /path/to/libero/libero_10
+output_root: /path/to/cache/libero_10_dinov2_fp16_v1
+num_demos_per_task: 50
+camera_keys:
+  - pixels
+  - pixels_egocentric
+source_image_size: 126
+input_size: 224
+patch_grid: 16
+embed_dim: 768
+dtype: float16
+shard_timesteps: 1024
+batch_timesteps: 64
+dinov2:
+  source_path: /path/to/dinov2/source
+  source_revision: 85a24602099d397264d5b30461ad7f3bfd726ca1
+  backbone_path: /path/to/dinov2_vitb14_pretrain.pth
+  backbone_sha256: 0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73
+  adapter_path: /path/to/dinov2_base_3dcorr.ckpt
+  adapter_sha256: 6f83bec78ea83fcec34b30a3e461282715dec9f3bb86a0a1adb6ad2502d5c9b8
+tasks:
+  - KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it
+  - KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it
+  - KITCHEN_SCENE8_put_both_moka_pots_on_the_stove
+  - KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it
+  - LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket
+  - LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket
+  - LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate
+  - STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy
+  - LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate
+  - LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket

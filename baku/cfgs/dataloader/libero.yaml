@@ -1,6 +1,6 @@
 bc_dataset:
   _target_: read_data.libero.BCDataset
-  path: "${root_dir}/expert_demos/libero"
+  path: ${oc.env:LIBERO_DATA_ROOT}
   suite: ${suite.task.suite}
   scenes: ${suite.task.scenes}
   tasks: ${suite.task.tasks}
@@ -13,3 +13,7 @@ bc_dataset:
   num_queries: ${num_queries}
   img_size: 126
   store_actions: true
+  dinov2_feature_cache_enabled: ${dinov2_feature_cache_enabled}
+  dinov2_feature_cache_root: ${dinov2_feature_cache_root}
+  dinov2_feature_cache_variant: ${dinov2_variant}
+  dinov2_feature_cache_manifest_sha256: ${dinov2_feature_cache_manifest_sha256}

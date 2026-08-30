@@ -28,7 +28,15 @@ from agent.networks.policy_head import (
 from agent.networks.gpt import GPT, GPTConfig
 from agent.networks.mlp import MLP
 from agent.networks.kmeans_discretizer import KMeansDiscretizer
+from agent.networks.dinov2_encoder import (
+    build_frozen_dinov2_and_projector,
+    describe_dinov2_projector,
+    normalize_dinov2_dense,
+)
 
+
+VGGT_MODEL_ID = "facebook/VGGT-1B"
+VGGT_REVISION = "860abec7937da0a4c03c41d3c269c366e82abdf9"
 
 
 class VGGTProjector(nn.Module):
@@ -113,6 +121,49 @@ class VGGTProjector(nn.Module):
         output = torch.stack(output_views, dim=1)
         
         return output
+
+
+class VGGTResnetFuser(nn.Module):
+    """
+    Paper-style cross-attention fuser:
+    use 2D tokens as queries and VGGT 3D tokens as keys/values.
+    """
+
+    def __init__(self, resnet_dim=512, vggt_dim=2048, fuse_dim=512, num_heads=8, dropout=0.0):
+        super().__init__()
+        self.q_proj = nn.Linear(resnet_dim, fuse_dim)
+        self.k_proj = nn.Linear(vggt_dim, fuse_dim)
+        self.v_proj = nn.Linear(vggt_dim, fuse_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=fuse_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.out_proj = (
+            nn.Identity() if fuse_dim == resnet_dim else nn.Linear(fuse_dim, resnet_dim)
+        )
+        self.ln = nn.LayerNorm(resnet_dim)
+
+    def forward(self, resnet_feats, vggt_tokens):
+        """
+        Args:
+            resnet_feats: [B, K, Dq] (one 2D token per view)
+            vggt_tokens: [B, K, P, Dv] (VGGT 3D tokens per view)
+        Returns:
+            fused: [B, K, Dq]
+        """
+        B, K, Dq = resnet_feats.shape
+        _, _, P, Dv = vggt_tokens.shape
+
+        q = resnet_feats.view(B * K, 1, Dq)
+        kv = vggt_tokens.view(B * K, P, Dv)
+
+        q_proj = self.q_proj(q)
+        k = self.k_proj(kv)
+        v = self.v_proj(kv)
+
+        attn_out, _ = self.attn(q_proj, k, v, need_weights=False)
+        out = self.out_proj(attn_out)
+        out = self.ln(out + q)
+        return out.view(B, K, Dq)
 
 
 class Actor(nn.Module):
@@ -281,6 +332,19 @@ class BCAgent:
         use_language,
         film,
         vggt_intermediate_layers,
+        dinov2_variant="stock",
+        dinov2_source_path=None,
+        dinov2_source_revision=None,
+        dinov2_backbone_weight_path=None,
+        dinov2_backbone_sha256=None,
+        dinov2_adapter_weight_path=None,
+        dinov2_adapter_sha256=None,
+        dinov2_source_image_size=126,
+        dinov2_input_size=224,
+        dinov2_projector_type="final_conv_v1",
+        dinov2_feature_cache_enabled=False,
+        dinov2_feature_cache_root=None,
+        dinov2_feature_cache_manifest_sha256=None,
     ):
         self.device = device
         self.lr = lr
@@ -302,6 +366,25 @@ class BCAgent:
         self.language_proj_type = "mlp"  # mlp or identity
         self.prompt = prompt
         self.film = film
+        self.dinov2_variant = dinov2_variant
+        self.dinov2_source_revision = dinov2_source_revision
+        self.dinov2_backbone_sha256 = dinov2_backbone_sha256
+        self.dinov2_adapter_sha256 = (
+            dinov2_adapter_sha256 if dinov2_variant == "3dcorr" else "none"
+        )
+        self.dinov2_source_image_size = int(dinov2_source_image_size)
+        self.dinov2_input_size = int(dinov2_input_size)
+        self.dinov2_projector_type = str(dinov2_projector_type)
+        self.dinov2_feature_cache_enabled = bool(dinov2_feature_cache_enabled)
+        self.dinov2_feature_cache_root = dinov2_feature_cache_root
+        self.dinov2_feature_cache_manifest_sha256 = (
+            None
+            if dinov2_feature_cache_manifest_sha256 in (None, "", "null")
+            else str(dinov2_feature_cache_manifest_sha256)
+        )
+        if self.dinov2_feature_cache_enabled and self.encoder_type != "dinov2":
+            raise ValueError("DINOv2 feature cache requires encoder_type=dinov2")
+        self.dinov2_backbone_frozen = True
 
         # language
         self.language_fusion = "none" if not self.use_language else "film"
@@ -387,17 +470,97 @@ class BCAgent:
                         p.numel() for p in self.encoder.parameters() if p.requires_grad
                     )
                 self.repr_dim = 512
+            elif self.encoder_type == "resnet_vggt":
+                if self.separate_encoders:
+                    raise ValueError("resnet_vggt does not support separate_encoders")
+                self.encoder = ResnetEncoder(
+                    obs_shape,
+                    512,
+                    language_dim=self.lang_repr_dim,
+                    language_fusion=self.language_fusion,
+                ).to(device)
+                model_size += sum(
+                    p.numel() for p in self.encoder.parameters() if p.requires_grad
+                )
+                # VGGT spatial encoder (frozen, used for token features)
+                self.vggt = VGGT.from_pretrained(
+                    VGGT_MODEL_ID,
+                    revision=VGGT_REVISION,
+                    local_files_only=True,
+                    enable_camera=False,
+                    enable_point=False,
+                    enable_depth=False,
+                    enable_track=False,
+                ).to(device)
+                for param in self.vggt.parameters():
+                    param.requires_grad = False
+
+                # Cross-attention fuser: 2D token queries, VGGT 3D tokens as K/V
+                self.vggt_fuser = VGGTResnetFuser(
+                    resnet_dim=512, vggt_dim=2048, fuse_dim=512, num_heads=8
+                ).to(device)
+                self.vggt_fuser.apply(utils.weight_init)
+
+                self.repr_dim = 512
+                model_size += sum(
+                    p.numel() for p in self.vggt_fuser.parameters() if p.requires_grad
+                )
             elif self.encoder_type == "vggt":
                 dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
                 
                 # Initialize the model
-                self.vggt = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
+                self.vggt = VGGT.from_pretrained(
+                    VGGT_MODEL_ID,
+                    revision=VGGT_REVISION,
+                    local_files_only=True,
+                    enable_camera=False,
+                    enable_point=False,
+                    enable_depth=False,
+                    enable_track=False,
+                ).to(device)
+                # VGGT is a frozen feature extractor. Keep it in eval mode so
+                # repeated runs do not enable training-only checkpointing or
+                # stochastic layers inside the pretrained backbone.
+                for param in self.vggt.parameters():
+                    param.requires_grad = False
+                self.vggt.eval()
                 
                 # More efficient projection using pooled features
                 # Input: pooled VGGT features (2048 -> 512)
                 
                 self.encoder = VGGTProjector(intermediate_layer_idx=vggt_intermediate_layers).to(device)
                 
+                self.repr_dim = 512
+                model_size += sum(
+                    p.numel() for p in self.encoder.parameters() if p.requires_grad
+                )
+            elif self.encoder_type == "dinov2":
+                if self.separate_encoders:
+                    raise ValueError("dinov2 uses one shared encoder for all camera views")
+                self.dinov2, self.encoder = build_frozen_dinov2_and_projector(
+                    variant=self.dinov2_variant,
+                    source_path=dinov2_source_path,
+                    source_revision=self.dinov2_source_revision,
+                    backbone_weight_path=dinov2_backbone_weight_path,
+                    backbone_sha256=self.dinov2_backbone_sha256,
+                    adapter_weight_path=dinov2_adapter_weight_path,
+                    adapter_sha256=dinov2_adapter_sha256,
+                    source_image_size=self.dinov2_source_image_size,
+                    input_size=self.dinov2_input_size,
+                    projector_type=self.dinov2_projector_type,
+                    output_dim=512,
+                )
+                self.dinov2 = self.dinov2.to(device)
+                self.encoder = self.encoder.to(device)
+                projector_metadata = describe_dinov2_projector(self.encoder)
+                self.dinov2_projector_type = projector_metadata["type"]
+                self.dinov2_projector_descriptor = projector_metadata["descriptor"]
+                self.dinov2_projector_parameter_count = projector_metadata[
+                    "parameter_count"
+                ]
+                self.dinov2_projector_state_shapes = projector_metadata[
+                    "state_shapes"
+                ]
                 self.repr_dim = 512
                 model_size += sum(
                     p.numel() for p in self.encoder.parameters() if p.requires_grad
@@ -477,12 +640,19 @@ class BCAgent:
         # optimizers
         # encoder
         if self.train_encoder:
-            if self.separate_encoders:
+            if self.encoder_type == "resnet_vggt":
+                params = list(self.encoder.parameters()) + list(
+                    self.vggt_fuser.parameters()
+                )
+            elif self.separate_encoders:
                 params = []
                 for key in self.pixel_keys:
                     params += list(self.encoder[key].parameters())
             else:
                 params = list(self.encoder.parameters())
+            params = [param for param in params if param.requires_grad]
+            if not params:
+                raise ValueError("train_encoder=true but no trainable encoder parameters exist")
             self.encoder_opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
         # proprio
         if self.use_proprio:
@@ -504,7 +674,7 @@ class BCAgent:
             if self.encoder_type == "small":
                 MEAN = torch.tensor([0.0, 0.0, 0.0])
                 STD = torch.tensor([1.0, 1.0, 1.0])
-            elif self.encoder_type == "resnet" or self.norm:
+            elif self.encoder_type in ["resnet", "resnet_vggt"] or self.norm:
                 MEAN = torch.tensor([0.485, 0.456, 0.406])
                 STD = torch.tensor([0.229, 0.224, 0.225])
             self.customAug = T.Compose([T.Normalize(mean=MEAN, std=STD)])
@@ -533,6 +703,15 @@ class BCAgent:
                     self.encoder.train(training)
                 else:
                     self.encoder.eval()
+            if self.encoder_type == "resnet_vggt":
+                if self.train_encoder:
+                    self.vggt_fuser.train(training)
+                else:
+                    self.vggt_fuser.eval()
+            if self.encoder_type in ["vggt", "resnet_vggt"]:
+                self.vggt.eval()
+            if self.encoder_type == "dinov2":
+                self.dinov2.eval()
             if self.use_language:
                 self.language_projector.train(training)
             if self.obs_type == "pixels" and self.use_proprio:
@@ -544,6 +723,12 @@ class BCAgent:
                     self.encoder[key].eval()
             else:
                 self.encoder.eval()
+            if self.encoder_type == "resnet_vggt":
+                self.vggt_fuser.eval()
+            if self.encoder_type in ["vggt", "resnet_vggt"]:
+                self.vggt.eval()
+            if self.encoder_type == "dinov2":
+                self.dinov2.eval()
             if self.use_language:
                 self.language_projector.eval()
             if self.obs_type == "pixels" and self.use_proprio:
@@ -607,12 +792,19 @@ class BCAgent:
 
     def reinit_optimizers(self):
         if self.train_encoder:
-            if self.separate_encoders:
+            if self.encoder_type == "resnet_vggt":
+                params = list(self.encoder.parameters()) + list(
+                    self.vggt_fuser.parameters()
+                )
+            elif self.separate_encoders:
                 params = []
                 for key in self.pixel_keys:
                     params += list(self.encoder[key].parameters())
             else:
                 params = list(self.encoder.parameters())
+            params = [param for param in params if param.requires_grad]
+            if not params:
+                raise ValueError("train_encoder=true but no trainable encoder parameters exist")
             self.encoder_opt = torch.optim.AdamW(params, lr=self.lr, weight_decay=1e-4)
         if self.use_proprio:
             self.proprio_opt = torch.optim.AdamW(
@@ -626,6 +818,57 @@ class BCAgent:
         self.actor_opt = torch.optim.AdamW(
             self.actor.parameters(), lr=self.lr, weight_decay=1e-4
         )
+
+    def _encode_dinov2_views(self, pixels):
+        """Encode N batches of V camera images into one 512-D token per view."""
+        if self.dinov2_feature_cache_enabled and self.training:
+            raise RuntimeError(
+                "cached DINOv2 training attempted a live encoder forward"
+            )
+        if pixels.ndim != 5:
+            raise ValueError(
+                f"expected DINOv2 view tensor [N,V,C,H,W], found {tuple(pixels.shape)}"
+            )
+        batch_size, num_views, channels, height, width = pixels.shape
+        flattened = pixels.reshape(
+            batch_size * num_views, channels, height, width
+        )
+        with torch.no_grad():
+            dense_features = self.dinov2(flattened)
+        if self.train_encoder:
+            projected = self.encoder(dense_features)
+        else:
+            with torch.no_grad():
+                projected = self.encoder(dense_features)
+        return projected.reshape(batch_size, num_views, self.repr_dim)
+
+    def _project_cached_dinov2_views(self, dense_features):
+        """Project cached pre-L2 FP16 maps through the normal FP32 path."""
+        if dense_features.ndim != 5:
+            raise ValueError(
+                "expected cached DINOv2 tensor [N,V,768,16,16], found "
+                f"{tuple(dense_features.shape)}"
+            )
+        batch_size, num_views, channels, height, width = dense_features.shape
+        expected_grid = self.dinov2_input_size // 14
+        if (channels, height, width) != (768, expected_grid, expected_grid):
+            raise ValueError(
+                "cached DINOv2 feature shape mismatch: expected "
+                f"(*,*,768,{expected_grid},{expected_grid}), found "
+                f"{tuple(dense_features.shape)}"
+            )
+        flattened = dense_features.reshape(
+            batch_size * num_views, channels, height, width
+        )
+        # This is deliberately identical to FrozenDINOv2.forward after the
+        # cache boundary.  Normalization is done after FP16->FP32 conversion.
+        flattened = normalize_dinov2_dense(flattened)
+        if self.train_encoder:
+            projected = self.encoder(flattened)
+        else:
+            with torch.no_grad():
+                projected = self.encoder(flattened)
+        return projected.reshape(batch_size, num_views, self.repr_dim)
 
     def act(self, obs, prompt, norm_stats, step, global_step, eval_mode=False):
         if norm_stats is not None:
@@ -694,7 +937,59 @@ class BCAgent:
                     
                     
                     features.append(key_features)
-            
+
+            elif self.encoder_type == "dinov2":
+                pixel_list = []
+                for key in self.pixel_keys:
+                    self.observation_buffer[key].append(
+                        self.test_aug(obs[key].transpose(1, 2, 0)).numpy()
+                    )
+                    pixel_list.append(
+                        torch.as_tensor(
+                            np.array(self.observation_buffer[key]),
+                            device=self.device,
+                        ).float()
+                    )
+                pixels = torch.stack(pixel_list, dim=1)
+                projected_views = self._encode_dinov2_views(pixels)
+                for view_index in range(len(self.pixel_keys)):
+                    features.append(projected_views[:, view_index, :])
+
+            elif self.encoder_type == "resnet_vggt":
+                pixel_list = []
+                resnet_feats = []
+                for key in self.pixel_keys:
+                    self.observation_buffer[key].append(
+                        self.test_aug(obs[key].transpose(1, 2, 0)).numpy()
+                    )
+                    pixels = torch.as_tensor(
+                        np.array(self.observation_buffer[key]), device=self.device
+                    ).float()
+                    pixel_list.append(pixels)
+
+                    pixels_resnet = (
+                        self.customAug(pixels / 255.0) if self.norm else pixels
+                    )
+                    lang = lang_features if self.film else None
+                    pixels_resnet = (
+                        self.encoder[key](pixels_resnet, lang=lang)
+                        if self.separate_encoders
+                        else self.encoder(pixels_resnet, lang=lang)
+                    )
+                    resnet_feats.append(pixels_resnet)
+
+                pixels_vggt = torch.stack(pixel_list, dim=1)
+                with torch.no_grad():
+                    vggt_features_list, ps_idx = self.vggt.aggregator(pixels_vggt)
+                vggt_tokens = vggt_features_list[-1][:, :, ps_idx:, :]
+
+                resnet_feats = torch.stack(resnet_feats, dim=1)
+                fused = self.vggt_fuser(resnet_feats, vggt_tokens)
+
+                for i in range(len(self.pixel_keys)):
+                    key_features = fused[:, i, :]
+                    features.append(key_features)
+
             else:
                 for key in self.pixel_keys:
                     self.observation_buffer[key].append(
@@ -741,24 +1036,40 @@ class BCAgent:
                 prompt_lang_features = None
 
             if self.obs_type == "pixels":
-                for key in self.pixel_keys:
-                    pixel = torch.as_tensor(
-                        prompt[f"prompt_{key}"], device=self.device
-                    ).float()
-                    shape = pixel.shape
-                    # reshape lang features
-                    if self.use_language and reshape_lang:
-                        prompt_lang_features = prompt_lang_features.repeat(shape[0], 1)
-                        reshape_lang = False
-                    # augment
-                    pixel = self.customAug(pixel / 255.0) if self.norm else pixel
-                    # encode
-                    pixel = (
-                        self.encoder[key](pixel, lang=prompt_lang_features)
-                        if self.separate_encoders
-                        else self.encoder(pixel, lang=prompt_lang_features)
-                    )
-                    prompt_features.append(pixel)
+                if self.encoder_type == "dinov2":
+                    prompt_pixels = []
+                    for key in self.pixel_keys:
+                        pixel = torch.as_tensor(
+                            prompt[f"prompt_{key}"], device=self.device
+                        ).float()
+                        # sample_test returns raw uint8 prompt images, unlike the
+                        # current observation path which passes through ToTensor.
+                        prompt_pixels.append(pixel / 255.0)
+                    prompt_pixels = torch.stack(prompt_pixels, dim=1)
+                    projected_views = self._encode_dinov2_views(prompt_pixels)
+                    for view_index in range(len(self.pixel_keys)):
+                        prompt_features.append(
+                            projected_views[:, view_index, :]
+                        )
+                else:
+                    for key in self.pixel_keys:
+                        pixel = torch.as_tensor(
+                            prompt[f"prompt_{key}"], device=self.device
+                        ).float()
+                        shape = pixel.shape
+                        # reshape lang features
+                        if self.use_language and reshape_lang:
+                            prompt_lang_features = prompt_lang_features.repeat(shape[0], 1)
+                            reshape_lang = False
+                        # augment
+                        pixel = self.customAug(pixel / 255.0) if self.norm else pixel
+                        # encode
+                        pixel = (
+                            self.encoder[key](pixel, lang=prompt_lang_features)
+                            if self.separate_encoders
+                            else self.encoder(pixel, lang=prompt_lang_features)
+                        )
+                        prompt_features.append(pixel)
                 if self.use_proprio:
                     proprio = torch.as_tensor(
                         prompt[f"prompt_{self.proprio_key}"], device=self.device
@@ -874,6 +1185,62 @@ class BCAgent:
                     key_features = pixels[:, i:i+1, :]  # [B, 1, 512]
                     features.append(key_features)
 
+            elif self.encoder_type == "dinov2":
+                pixel_list = []
+                shape = data[self.pixel_keys[0]].shape
+                for key in self.pixel_keys:
+                    pixel = einops.rearrange(
+                        data[key], "b t c h w -> (b t) c h w"
+                    )
+                    pixel_list.append(pixel)
+                pixels = torch.stack(pixel_list, dim=1)
+                if self.dinov2_feature_cache_enabled:
+                    projected_views = self._project_cached_dinov2_views(pixels)
+                else:
+                    projected_views = self._encode_dinov2_views(pixels.float())
+                projected_views = projected_views.reshape(
+                    shape[0], shape[1], len(self.pixel_keys), self.repr_dim
+                )
+                for view_index in range(len(self.pixel_keys)):
+                    features.append(projected_views[:, :, view_index, :])
+
+            elif self.encoder_type == "resnet_vggt":
+                pixel_list = []
+                resnet_feats = []
+                for key in self.pixel_keys:
+                    pixel = data[key].float()
+                    shape = pixel.shape
+                    # rearrange
+                    pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
+                    pixel_list.append(pixel)
+
+                    pixels_resnet = (
+                        self.customAug(pixel / 255.0) if self.norm else pixel
+                    )
+                    lang = lang_features if self.film else None
+                    if self.train_encoder:
+                        pixels_resnet = self.encoder(pixels_resnet, lang=lang)
+                    else:
+                        with torch.no_grad():
+                            pixels_resnet = self.encoder(pixels_resnet, lang=lang)
+                    resnet_feats.append(pixels_resnet)
+
+                pixels_vggt = torch.stack(pixel_list, dim=1)
+                with torch.no_grad():
+                    vggt_features_list, ps_idx = self.vggt.aggregator(pixels_vggt)
+                vggt_tokens = vggt_features_list[-1][:, :, ps_idx:, :]
+
+                resnet_feats = torch.stack(resnet_feats, dim=1)
+                if self.train_encoder:
+                    fused = self.vggt_fuser(resnet_feats, vggt_tokens)
+                else:
+                    with torch.no_grad():
+                        fused = self.vggt_fuser(resnet_feats, vggt_tokens)
+
+                for i in range(len(self.pixel_keys)):
+                    key_features = fused[:, i:i+1, :]  # [B, 1, 512]
+                    features.append(key_features)
+
             else:
                 for key in self.pixel_keys:
                     pixel = data[key].float()
@@ -934,38 +1301,80 @@ class BCAgent:
                 prompt_lang_features = None
 
             if self.obs_type == "pixels":
-                for key in self.pixel_keys:
-                    pixel = data[f"prompt_{key}"].float()
-                    shape = pixel.shape
-                    # reshape lang features
-                    if self.use_language and reshape_lang:
-                        prompt_lang_features = prompt_lang_features.repeat(
-                            1, shape[1], 1
+                if self.encoder_type == "dinov2":
+                    prompt_shape = data[f"prompt_{self.pixel_keys[0]}"].shape
+                    prompt_pixels = []
+                    for key in self.pixel_keys:
+                        prompt_pixels.append(
+                            einops.rearrange(
+                                data[f"prompt_{key}"],
+                                "b t c h w -> (b t) c h w",
+                            )
                         )
-                        prompt_lang_features = einops.rearrange(
-                            prompt_lang_features, "b t d -> (b t) d"
-                        )
-                        reshape_lang = False
-                    # rearrange
-                    pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
-                    # augment
-                    pixel = self.customAug(pixel / 255.0) if self.norm else pixel
-                    # encode
-                    if self.train_encoder:
-                        pixel = (
-                            self.encoder[key](pixel, lang=prompt_lang_features)
-                            if self.separate_encoders
-                            else self.encoder(pixel, lang=prompt_lang_features)
+                    prompt_pixels = torch.stack(prompt_pixels, dim=1)
+                    if self.dinov2_feature_cache_enabled:
+                        projected_views = self._project_cached_dinov2_views(
+                            prompt_pixels
                         )
                     else:
-                        with torch.no_grad():
+                        projected_views = self._encode_dinov2_views(
+                            prompt_pixels.float()
+                        )
+                    projected_views = projected_views.reshape(
+                        prompt_shape[0],
+                        prompt_shape[1],
+                        len(self.pixel_keys),
+                        self.repr_dim,
+                    )
+                    for view_index in range(len(self.pixel_keys)):
+                        prompt_features.append(
+                            projected_views[:, :, view_index, :]
+                        )
+                else:
+                    for key in self.pixel_keys:
+                        pixel = data[f"prompt_{key}"].float()
+                        prompt_shape = pixel.shape
+                        # reshape lang features
+                        if self.use_language and reshape_lang:
+                            prompt_lang_features = prompt_lang_features.repeat(
+                                1, prompt_shape[1], 1
+                            )
+                            prompt_lang_features = einops.rearrange(
+                                prompt_lang_features, "b t d -> (b t) d"
+                            )
+                            reshape_lang = False
+                        # rearrange
+                        pixel = einops.rearrange(
+                            pixel, "b t c h w -> (b t) c h w"
+                        )
+                        # augment
+                        pixel = (
+                            self.customAug(pixel / 255.0) if self.norm else pixel
+                        )
+                        # encode
+                        if self.train_encoder:
                             pixel = (
                                 self.encoder[key](pixel, lang=prompt_lang_features)
                                 if self.separate_encoders
                                 else self.encoder(pixel, lang=prompt_lang_features)
                             )
-                    pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
-                    prompt_features.append(pixel)
+                        else:
+                            with torch.no_grad():
+                                pixel = (
+                                    self.encoder[key](
+                                        pixel, lang=prompt_lang_features
+                                    )
+                                    if self.separate_encoders
+                                    else self.encoder(
+                                        pixel, lang=prompt_lang_features
+                                    )
+                                )
+                        pixel = einops.rearrange(
+                            pixel,
+                            "(b t) d -> b t d",
+                            t=prompt_shape[1],
+                        )
+                        prompt_features.append(pixel)
                 if self.use_proprio:
                     proprio = data[f"prompt_{self.proprio_key}"].float()
                     proprio = self.proprio_projector(proprio)
@@ -1047,13 +1456,15 @@ class BCAgent:
                 pred_action = pred_action[0]
             else:
                 pred_action = pred_action.mean
-            metrics["pred_action"] = pred_action.cpu().numpy()
+            metrics["pred_action"] = pred_action.detach().cpu().numpy()
 
             return metrics
 
     def save_snapshot(self):
         model_keys = ["actor", "encoder"]
         opt_keys = ["actor_opt"]
+        if self.encoder_type == "resnet_vggt":
+            model_keys += ["vggt_fuser"]
         if self.train_encoder:
             opt_keys += ["encoder_opt"]
         if self.obs_type == "pixels" and self.use_proprio:
@@ -1073,7 +1484,7 @@ class BCAgent:
             else:
                 payload["encoder"] = self.encoder.state_dict()
         # optimizers
-        payload.update({k: self.__dict__[k] for k in opt_keys})
+        payload.update({k: self.__dict__[k].state_dict() for k in opt_keys})
 
         if self.policy_head == "bet":
             payload["cluster_centers"] = self._cluster_centers
@@ -1089,8 +1500,34 @@ class BCAgent:
         return payload
 
     def load_snapshot(self, payload, eval=False, load_opt=False):
+        actor_payload = payload.get("actor", None)
+        if actor_payload is not None:
+            # Detect the common policy-head mismatch early and raise a clear error.
+            has_vqbet_head = any(
+                k.startswith("_action_head._map_to_cbet_preds_")
+                for k in actor_payload.keys()
+            )
+            has_mlp_head = any(
+                k.startswith("_action_head.net.") for k in actor_payload.keys()
+            )
+
+            if self.policy_head == "vqbet" and has_mlp_head and not has_vqbet_head:
+                raise ValueError(
+                    "Checkpoint/config mismatch: current policy_head is 'vqbet' but "
+                    "the checkpoint actor looks like a non-vqbet head (contains "
+                    "'_action_head.net.*' and no vqbet prediction layers)."
+                )
+            if self.policy_head != "vqbet" and has_vqbet_head and not has_mlp_head:
+                raise ValueError(
+                    "Checkpoint/config mismatch: current policy_head is "
+                    f"'{self.policy_head}' but the checkpoint actor looks like "
+                    "'vqbet' (contains '_action_head._map_to_cbet_preds_*')."
+                )
+
         # models
         model_keys = ["actor", "encoder"]
+        if self.encoder_type == "resnet_vggt":
+            model_keys += ["vggt_fuser"]
         if self.obs_type == "pixels" and self.use_proprio:
             model_keys += ["proprio_projector"]
         if self.use_language:
@@ -1100,6 +1537,17 @@ class BCAgent:
                 for key in self.pixel_keys:
                     self.encoder[key].load_state_dict(payload[f"encoder_{key}"])
             else:
+                if k not in payload:
+                    if k == "vggt_fuser":
+                        if load_opt:
+                            raise KeyError(
+                                "Checkpoint is missing vggt_fuser weights; strict resume cannot proceed."
+                            )
+                        print(
+                            "[warn] vggt_fuser weights are missing in the checkpoint; using current initialization."
+                        )
+                        continue
+                    raise KeyError(f"Missing key '{k}' in checkpoint payload")
                 self.__dict__[k].load_state_dict(payload[k])
 
         if self.policy_head == "bet":
@@ -1127,5 +1575,13 @@ class BCAgent:
             if self.use_language:
                 opt_keys += ["language_opt"]
             for k in opt_keys:
-                self.__dict__[k] = payload[k]
+                if k not in payload:
+                    raise KeyError(
+                        f"Missing optimizer key '{k}' in checkpoint payload during resume"
+                    )
+                opt_state = payload[k]
+                # Backward compatibility: older checkpoints stored full optimizer objects.
+                if hasattr(opt_state, "state_dict"):
+                    opt_state = opt_state.state_dict()
+                self.__dict__[k].load_state_dict(opt_state)
         self.train(True)

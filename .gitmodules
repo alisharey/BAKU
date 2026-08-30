@@ -6,3 +6,6 @@
 	path = Open-Teach
 	url = https://github.com/siddhanthaldar/Open-Teach.git
 	branch = baku
+[submodule "baku/vggt"]
+	path = baku/vggt
+	url = https://github.com/facebookresearch/vggt.git

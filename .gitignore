@@ -8,6 +8,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+ckpts/
 build/
 develop-eggs/
 dist/
@@ -173,3 +174,48 @@ expert_demos/
 */exp_local/
 baku/task_names_env.txt
 baku/test_save.py
+
+# Local datasets and generated experiment artifacts
+/LIBERO/
+/caches/
+/campaigns/
+/baku/campaigns/
+/baku/exp_local/
+**/expert_demos/
+**/snapshot/
+**/snapshots/
+**/checkpoints/
+**/weights/
+**/runs/
+**/logs/
+**/state/
+**/smoke/
+
+# Model, feature-cache, and dataset payloads
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+
+# Scheduler, evaluator, and tracking output
+slurm-*.out
+slurm-*.err
+*.err
+events.out.tfevents*
+wandb/
+ray_results/
+
+# Loose research/download artifacts
+/*.pdf
+/*.zip
+/*.tar
+/*.tar.gz
+/*.tgz
+/method.txt
+/run.sh

@@ -9,15 +9,13 @@ import torchvision
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import List
+from pathlib import Path
 
 from ..util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
 import os, sys
-baku_agent_path = os.path.dirname(os.path.abspath(__file__))
-baku_path = os.path.dirname(baku_agent_path)
-vggt_parent_path = "/l/users/ali.abouzeid/BAKU/baku/vggt"
-print(f"Adding VGGT path: {vggt_parent_path}")  # Debugging line
+vggt_parent_path = str(Path(__file__).resolve().parents[6] / "vggt")
 if vggt_parent_path not in sys.path:
     sys.path.insert(0, vggt_parent_path)
 
@@ -34,7 +32,13 @@ class VGGT_BackBone(nn.Module):
         self.use_cache = use_cache
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.intermediate_layer_idx = intermediate_layer_idx
-        self.vggt = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
+        self.vggt = VGGT.from_pretrained(
+            "facebook/VGGT-1B",
+            enable_camera=False,
+            enable_point=False,
+            enable_depth=False,
+            enable_track=False,
+        ).to(device)
         for param in self.vggt.parameters():
             param.requires_grad = False
         self.feature_projector = VGGTProjector(
