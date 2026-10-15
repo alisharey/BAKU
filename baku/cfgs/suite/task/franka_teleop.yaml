@@ -1,0 +1,6 @@
+defaults:
+  - _self_
+
+suite: franka_teleop
+# <task>.pkl names in the dataset folder; empty = every task there.
+tasks: []

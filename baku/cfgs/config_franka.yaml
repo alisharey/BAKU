@@ -1,0 +1,62 @@
+# Franka FR3 fine-tuning (franka_teleop recordings, TeleMoMa actions).
+#   python train_franka.py                                   # from scratch
+#   python train_franka.py init_from=<LIBERO snapshot .pt>   # start from a LIBERO BAKU
+defaults:
+  - _self_
+  - agent: baku
+  - suite: franka_teleop
+  - dataloader: franka_teleop
+  - override hydra/launcher: submitit_local
+
+root_dir: /l/users/ali.abouzeid/BAKU-franka/
+
+# misc
+seed: 2
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: true
+batch_size: 64
+
+# experiment
+obs_type: "pixels"
+num_demos_per_task: 1000          # all demos
+demo_offset: 0                    # first demo used (hold out the first n with demo_offset=n)
+encoder_type: 'resnet'
+policy_type: 'gpt'
+policy_head: vqbet
+use_proprio: false
+use_language: true
+use_actions: false
+prompt: text
+eval: false
+experiment: train
+experiment_label: ${policy_head}
+
+# Weights from another BAKU snapshot (e.g. LIBERO). Loads the image encoder,
+# GPT trunk and language projector. The VQ-VAE is NEVER loaded: it was just
+# fit to these actions (train.py's load_bc would overwrite it with the
+# LIBERO codebook, whose codes mean LIBERO actions). The VQ-BeT heads are
+# re-initialized unless init_action_head=true (their 16 codes change meaning).
+init_from: null
+init_action_head: false
+
+# action chunking: 10 steps at the dataset rate (10 Hz -> 1 s)
+temporal_agg: true
+num_queries: 10
+
+expert_dataset: ${dataloader.bc_dataset}
+
+load_bc: false
+bc_weight: null
+
+hydra:
+  run:
+    dir: ./exp_local/${suite.suite}_${encoder_type}_train/${now:%m%d}_${now:%H%M%S}_${policy_head}_seed_${seed}
+  sweep:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}
+    subdir: ${hydra.job.num}
+  launcher:
+    tasks_per_node: 1
+    nodes: 1
+    submitit_folder: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${experiment}/.slurm
