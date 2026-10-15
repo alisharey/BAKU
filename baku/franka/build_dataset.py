@@ -149,7 +149,7 @@ def main():
         sys.exit('no usable episodes')
 
     from sentence_transformers import SentenceTransformer
-    encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')  # tiny; leave the GPU alone
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     manifest = {'format': FORMAT, 'size': args.size, 'subsample': args.subsample,
