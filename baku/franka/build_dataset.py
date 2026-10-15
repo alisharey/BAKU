@@ -112,7 +112,7 @@ def load_episode(folder, args, camera_keys):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('episodes', nargs='+', help='exported episode folders (with lowdim.npz)')
-    parser.add_argument('--out', required=True, help='folder for <task>.pkl (expert_dataset.path)')
+    parser.add_argument('--out', required=True, help='folder for <task>.pkl (dataloader.bc_dataset.path)')
     parser.add_argument('--task', default=None, help='task text for every episode (default: each episode.json task)')
     parser.add_argument('--agent-camera', default='cam_2', help='camera for "pixels" (third-person)')
     parser.add_argument('--wrist-camera', default='cam_1', help='camera for "pixels_egocentric"')

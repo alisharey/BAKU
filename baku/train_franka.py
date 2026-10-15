@@ -10,7 +10,7 @@ plus:
   image preprocessing, dataset rate and the action convention ('franka' key).
 
     cd BAKU/baku
-    python train_franka.py expert_dataset.path=/abs/expert_demos/franka_teleop \
+    python train_franka.py dataloader.bc_dataset.path=/abs/expert_demos/franka_teleop \
         init_from=/abs/exp_local/libero_resnet_train/<run>/snapshot/150000.pt
 """
 

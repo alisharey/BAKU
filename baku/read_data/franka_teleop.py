@@ -7,13 +7,10 @@ Differences from the LIBERO and xArm loaders, on purpose:
   rebuilds relative actions from absolute poses (get_relative_action); LIBERO
   uses robosuite's actions, which are already scaled to [-1, 1] (OSC: 1 = 5 cm,
   0.5 rad), so its loader does not normalize (stats min 0, max 1).
-* Our pose actions are a few cm / a few hundredths of a rad, so they ARE
-  normalized, otherwise the VQ-VAE codebook and the offset loss see almost
-  nothing. Default "symmetric": each pose dimension is divided by a robust
-  scale s (a high percentile of |a|) and mapped to [0, 1] with 0 -> 0.5:
-  min = -s, max = +s in BAKU's (x - min) / (max - min). The gripper (1 open,
-  0 closed) keeps min 0, max 1. BAKU's act() undoes it with the same stats,
-  which train.py saves in every snapshot.
+* Normalization is BAKU's min-max step, (x - min) / (max - min), undone in
+  agent.act with the same stats (saved in every snapshot). LIBERO's loader uses
+  min 0 / max 1 (no change); by default this one matches the xArm loader:
+  min/max of the demo actions per dimension, rotation dims left at 0 / 1.
 * Padding past the end of a demo: zero pose action (the arm holds still) and
   the last gripper state.
 """
@@ -32,19 +29,30 @@ POSE_DIMS = 6
 
 
 def action_stats(actions, normalization, percentile):
+    """min/max for BAKU's (x - min) / (max - min) (undone in agent.act with the same stats).
+
+    xarm (default): exactly BAKU's xArm loader (read_data/xarm_env.py): per-dimension
+        min/max over all demo actions (history padding included), rotation dims set to
+        min 0 / max 1 ("nullify action orientation normalization").
+    none: BAKU's LIBERO loader: min 0 / max 1 everywhere (actions unchanged).
+    minmax: per-dimension min/max, rotation included.
+    symmetric: pose dims -s..+s with s = percentile of |a|; gripper 0/1.
+    """
     stacked = np.concatenate(actions, axis=0)
     dims = stacked.shape[-1]
     if normalization == 'none':
         return np.zeros(dims, dtype=np.float32), np.ones(dims, dtype=np.float32)
     low = stacked.min(axis=0).astype(np.float32)
     high = stacked.max(axis=0).astype(np.float32)
-    if normalization == 'symmetric':
+    if normalization == 'xarm':
+        low[3:6], high[3:6] = 0, 1
+    elif normalization == 'symmetric':
         scale = np.percentile(np.abs(stacked[:, :POSE_DIMS]), percentile, axis=0)
         scale = np.maximum(scale, 1e-4).astype(np.float32)
         low[:POSE_DIMS], high[:POSE_DIMS] = -scale, scale
+        low[POSE_DIMS:], high[POSE_DIMS:] = 0.0, 1.0
     elif normalization != 'minmax':
-        raise ValueError('normalization must be symmetric, minmax or none, got %r' % normalization)
-    low[POSE_DIMS:], high[POSE_DIMS:] = 0.0, 1.0  # gripper: 1 open, 0 closed
+        raise ValueError('normalization must be xarm, none, minmax or symmetric, got %r' % normalization)
     return low, high
 
 
@@ -111,7 +119,6 @@ class BCDataset(IterableDataset):
             for i in chosen:
                 observation = dict(data["observations"][i])
                 action = np.asarray(data[action_key][i], dtype=np.float32)
-                raw_actions.append(action)
                 proprio.append(np.concatenate([observation["cartesian_states"],
                                                observation["gripper_states"][:, None]], axis=1))
                 # history padding: repeat the last observation; hold still with the last gripper state
@@ -121,6 +128,7 @@ class BCDataset(IterableDataset):
                 hold = np.zeros_like(action[-1])
                 hold[POSE_DIMS:] = action[-1, POSE_DIMS:]
                 action = np.concatenate([action, [hold] * self._history_len], axis=0)
+                raw_actions.append(action)  # padded, as the xArm loader computes its min/max
                 self._episodes[task_index].append(
                     dict(observation=observation, action=action, task_emb=self.task_embs[-1]))
                 self._max_episode_len = max(self._max_episode_len, len(observation[self._pixel_keys[0]]))

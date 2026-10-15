@@ -29,16 +29,14 @@ robot each action becomes a target (pose + action) that the teleop controller
 tracks, exactly as during recording. `delta_pose_actions` (next-step delta
 pose) is also stored for comparison (`dataloader.bc_dataset.action_key`).
 
-### Normalization (why this differs from LIBERO)
+### Normalization
 
-LIBERO's actions are robosuite OSC commands already in [-1, 1] (1 = 5 cm /
-0.5 rad), so BAKU's LIBERO loader does not normalize (stats min 0, max 1). The
-xArm loader rebuilds relative actions from poses and min-max normalizes them,
-except the rotation. Our pose actions are a few cm and a few hundredths of a
-rad, so they are normalized; otherwise the VQ-VAE and the offset loss see almost
-nothing. Default `symmetric`: each pose dimension uses min = -s, max = +s with
-s = the 99.5th percentile of |a|, so 0 maps to 0.5; the gripper keeps 0/1.
-`act()` undoes it with the same stats, which every snapshot stores.
+BAKU's loaders all use the same min-max step on actions, (x - min) / (max - min),
+undone in `agent.act` with the same stats (saved in every snapshot). The LIBERO
+loader sets min 0 / max 1 (actions unchanged). The xArm (real robot) loader
+takes min/max per dimension from the demo actions and sets the rotation
+dimensions to 0 / 1. This loader does the same as the xArm one by default
+(`normalization: xarm`); `none` = LIBERO's.
 
 ### VQ-BeT and starting from a LIBERO snapshot
 
@@ -60,7 +58,8 @@ python franka/preview_images.py ../expert_demos/franka_teleop_export/<episode> -
     --spec resize --spec center_crop --spec crop:200,0,440,440
 python franka/build_dataset.py ../expert_demos/franka_teleop_export/* --out ../expert_demos/franka_teleop \
     --subsample 3 --agent-image resize --wrist-image resize
-python train_franka.py init_from=<LIBERO run>/snapshot/<step>.pt     # or without init_from
+python train_franka.py dataloader.bc_dataset.path=$PWD/../expert_demos/franka_teleop \
+    init_from=<LIBERO run>/snapshot/<step>.pt     # or without init_from
 python franka/offline_eval.py exp_local/franka_teleop_resnet_train/<run>/snapshot/<step>.pt \
     --data ../expert_demos/franka_teleop --plot eval.png
 

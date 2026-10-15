@@ -13,7 +13,7 @@ bc_dataset:
   img_size: 128
   pixel_keys: ${suite.pixel_keys}
   action_key: actions            # TeleMoMa (as executed); delta_pose_actions for the delta-pose baseline
-  normalization: symmetric       # symmetric | minmax | none (see read_data/franka_teleop.py)
+  normalization: xarm            # as BAKU's xArm loader; none = as LIBERO's (see read_data/franka_teleop.py)
   norm_percentile: 99.5
   augment: true                  # random 4 px shift + color jitter, as BAKU's xArm loader
   store_actions: true

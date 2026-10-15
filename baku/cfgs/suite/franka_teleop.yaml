@@ -12,7 +12,7 @@ discount: 0.99
 hidden_dim: 256
 
 # train settings
-num_train_steps: 60001
+num_train_steps: 50001
 log_every_steps: 500
 save_every_steps: 10000
 history: false
