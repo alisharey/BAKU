@@ -4,7 +4,8 @@
     policy.reset()
     action = policy.act({'pixels': cam_2_rgb, 'pixels_egocentric': cam_1_rgb})  # raw 640x480 RGB frames
     # action: [dx dy dz droll dpitch dyaw gripper] in robot units (TeleMoMa convention)
-    policy.last  # VQ-BeT codebook entropies/probabilities and the action-token feature of this step
+    policy.last  # this step's VQ-BeT internals: entropies, probability of the picked codes,
+                 # full code distributions, picked codes, predicted action chunk, action-token feature
 
 The entropies and the feature (the GPT action token, the input of the VQ-BeT
 head) are read with a forward hook on the action head, so this works with
@@ -111,15 +112,25 @@ class FrankaPolicy:
         if not isinstance(output, dict):
             return out
         centers = output.get("sampled_centers")
-        entropies, probs = [], []
+        if centers is not None:
+            out["codes"] = centers.reshape(-1, centers.shape[-1])[-1].cpu().numpy().astype(np.int64)
+        chunk = output.get("predicted_action")
+        if chunk is not None:  # this step's predicted chunk (num_queries x 7), in robot units
+            chunk = chunk.reshape(-1, chunk.shape[-1])[-1].float().cpu().numpy().reshape(-1, 7)
+            low, high = self.stats["actions"]["min"], self.stats["actions"]["max"]
+            out["action_chunk"] = chunk * (high - low) + low
+        entropies, probs, distributions = [], [], []
         for index, name in enumerate(("cbet_logits1", "cbet_logits2")):
             logits = output.get(name)
             if logits is None:
                 continue
             p = torch.softmax(logits.float(), dim=-1).reshape(-1, logits.shape[-1])[-1]
+            distributions.append(p.cpu().numpy())
             entropies.append(float(-(p * torch.log(p + 1e-8)).sum()))
             if centers is not None:
                 probs.append(float(p[int(centers.reshape(-1, centers.shape[-1])[-1, index])]))
+        if distributions:
+            out["code_probs"] = np.stack(distributions)  # codebooks x codes
         if entropies:
             out["token_entropy"] = entropies
             out["token_prob"] = probs
