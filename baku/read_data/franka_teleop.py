@@ -26,6 +26,10 @@ import torchvision.transforms as transforms
 from torch.utils.data import IterableDataset
 
 POSE_DIMS = 6
+# libero normalization: like LIBERO's actions (the controller's delta limits = +-1, clipped), with our
+# limits = vla/baku/deploy.py's: 5 cm position (deploy caps the move's length, this clips per axis),
+# 0.3 rad rotation per axis
+LIBERO_LIMITS = (0.05, 0.3)
 
 
 def action_stats(actions, normalization, percentile):
@@ -37,6 +41,9 @@ def action_stats(actions, normalization, percentile):
     none: BAKU's LIBERO loader: min 0 / max 1 everywhere (actions unchanged).
     minmax: per-dimension min/max, rotation included.
     symmetric: pose dims -s..+s with s = percentile of |a|; gripper 0/1.
+    libero: as LIBERO's actions (BAKU's LIBERO loader normalizes nothing; its actions are already the
+        controller's +-1): position / 0.05 m, rotation / 0.3 rad (the actions are clipped to these first,
+        see BCDataset), gripper 0/1 -> -1/+1.
     """
     stacked = np.concatenate(actions, axis=0)
     dims = stacked.shape[-1]
@@ -51,8 +58,11 @@ def action_stats(actions, normalization, percentile):
         scale = np.maximum(scale, 1e-4).astype(np.float32)
         low[:POSE_DIMS], high[:POSE_DIMS] = -scale, scale
         low[POSE_DIMS:], high[POSE_DIMS:] = 0.0, 1.0
+    elif normalization == 'libero':
+        low[:], high[:3], high[3:POSE_DIMS] = 0.0, LIBERO_LIMITS[0], LIBERO_LIMITS[1]
+        low[POSE_DIMS:], high[POSE_DIMS:] = 0.5, 1.0
     elif normalization != 'minmax':
-        raise ValueError('normalization must be xarm, none, minmax or symmetric, got %r' % normalization)
+        raise ValueError('normalization must be xarm, none, minmax, symmetric or libero, got %r' % normalization)
     return low, high
 
 
@@ -119,6 +129,10 @@ class BCDataset(IterableDataset):
             for i in chosen:
                 observation = dict(data["observations"][i])
                 action = np.asarray(data[action_key][i], dtype=np.float32)
+                if normalization == 'libero':  # to the limits (deploy.py limits larger moves too)
+                    action = action.copy()
+                    action[:, :3] = np.clip(action[:, :3], -LIBERO_LIMITS[0], LIBERO_LIMITS[0])
+                    action[:, 3:POSE_DIMS] = np.clip(action[:, 3:POSE_DIMS], -LIBERO_LIMITS[1], LIBERO_LIMITS[1])
                 proprio.append(np.concatenate([observation["cartesian_states"],
                                                observation["gripper_states"][:, None]], axis=1))
                 # history padding: repeat the last observation; hold still with the last gripper state
